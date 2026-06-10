@@ -1,0 +1,28 @@
+# Runtime state
+installer/dist/port.txt
+installer/dist/run.log
+installer/dist/*.exe
+installer/dist/*.pfx
+installer/dist/*.crt
+installer/dist/cert.thumbprint
+installer/dist/certs/
+
+# Build artifacts
+installer/build/sea-prep.blob
+installer/build/sea-config.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Logs
+*.log
+
+# Patch backups
+*.orig
+
+# Local Claude Code settings
+.claude/
