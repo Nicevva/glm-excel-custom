@@ -73,12 +73,12 @@ Open Excel → **Home** tab → **AI in Excel** → **Settings** → enter your 
 
 Switching the provider in Settings auto-fills the base URL via the local proxy:
 
-| Provider | Auto-filled base URL |
-|---|---|
-| GLM (ZhipuAI) | official endpoint (CORS-enabled, direct) |
-| OpenAI | `https://localhost:PORT/proxy/api.openai.com/v1` |
-| Anthropic Claude | `https://localhost:PORT/proxy/api.anthropic.com` |
-| OpenAI-compatible | `https://localhost:PORT/proxy/<your-relay-domain>` |
+| Provider | Auto-filled base URL | Recommended Model |
+|---|---|---|
+| GLM (ZhipuAI) | official endpoint (CORS-enabled, direct) | GLM-5 / GLM-5.1 |
+| OpenAI | `https://localhost:PORT/proxy/api.openai.com/v1` | GPT-5.3 codex |
+| Anthropic Claude | `https://localhost:PORT/proxy/api.anthropic.com` | claude-4.7 / claude-4.6 |
+| OpenAI-compatible | `https://localhost:PORT/proxy/<your-relay-domain>` | Depends on relay |
 
 The proxy at `/proxy/<domain>/<path>` forwards server-side (no CORS
 restrictions) and adds the necessary CORS response headers.
@@ -224,12 +224,12 @@ start-server.cmd
 
 在设置中切换供应商时，Base URL 会通过本地代理自动填写：
 
-| 供应商 | 自动填写的 Base URL |
-|---|---|
-| GLM（智谱AI） | 官方端点（直连，已支持 CORS） |
-| OpenAI | `https://localhost:PORT/proxy/api.openai.com/v1` |
-| Anthropic Claude | `https://localhost:PORT/proxy/api.anthropic.com` |
-| OpenAI 兼容端点 | `https://localhost:PORT/proxy/<你的中继域名>` |
+| 供应商 | 自动填写的 Base URL | 推荐模型 |
+|---|---|---|
+| GLM（智谱AI） | 官方端点（直连，已支持 CORS） | GLM-5 / GLM-5.1 |
+| OpenAI | `https://localhost:PORT/proxy/api.openai.com/v1` | GPT-5.3 codex |
+| Anthropic Claude | `https://localhost:PORT/proxy/api.anthropic.com` | claude-4.7 / claude-4.6 |
+| OpenAI 兼容端点 | `https://localhost:PORT/proxy/<你的中继域名>` | 取决于中转站 |
 
 代理在服务器端转发请求（无跨域限制），并自动添加必要的 CORS 响应头。
 
