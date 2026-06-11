@@ -132,24 +132,29 @@ src = lit(src, 'fot="GLM in Excel"', 'fot="AI in Excel (Custom)"', "P4 app-title
 src = set_i18n(src, "settings.aboutDesc",
                ("AI in Excel (Custom) — chat with AI models directly inside Excel. "
                 "Supports OpenAI, Anthropic Claude and any compatible/relay endpoint. "
-                "Your API key is stored only in this browser. Developed ."),
+                "Your API key is stored only in this browser. "
+                "Developed by Nicevva. "
+                "GitHub: github.com/Nicevva/glm-excel-custom | "
+                "Web: glm-excel-web.vercel.app"),
                ("AI in Excel (Custom) —— 在 Excel 中直接与 AI 模型对话，"
                 "支持 OpenAI、Anthropic Claude 及任意兼容 / 中转接口。"
-                "API 密钥仅保存在本浏览器本地，不会上传。由 [Author] 开发。"),
+                "API 密钥仅保存在本浏览器本地，不会上传。由 Nicevva 开发。"
+                "GitHub：github.com/Nicevva/glm-excel-custom | "
+                "主页：glm-excel-web.vercel.app"),
                "P5 aboutDesc")
 
 # ---- P6: contact line + support link ---------------------------------------
 src = set_i18n(src, "settings.corsAbout",
-               "Questions? Contact the developer [Author]: ",
-               "有问题请联系开发者 [Author]：",
+               "Questions? Visit GitHub: ",
+               "有问题请访问 GitHub：",
                "P6a contact-text")
 src = set_i18n(src, "settings.updateCoding",
-               "your.email@example.com", "your.email@example.com",
+               "github.com/Nicevva/glm-excel-custom", "github.com/Nicevva/glm-excel-custom",
                "P6b link-text")
 src = lit(src,
           ('"https://bigmodel.cn/glm-coding?utm_source=bigModel&utm_medium=Frontend%20Model%20Group'
            '&utm_content=glm-code&utm_campaign=Platform_Ops&_channel_track_key=bW5juXcZ"'),
-          '"mailto:your.email@example.com"',
+          '"https://github.com/Nicevva/glm-excel-custom"',
           "P6c link-href")
 
 # ---- P7: header logo image --------------------------------------------------
@@ -167,7 +172,7 @@ src = lit(src,
 # ---- P9: footer copyright (appears twice) ----------------------------------
 src = lit(src,
           'Copyright (c) 2025 Mario Zechner.',
-          'Copyright (c) 2026 AI-in-Excel. Developed .',
+          'Copyright (c) 2026 Nicevva. github.com/Nicevva/glm-excel-custom',
           "P9 copyright", count=2)
 
 # ---- P10: remove the "beta" badge next to the header logo ------------------
