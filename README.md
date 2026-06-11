@@ -5,6 +5,30 @@ OpenAI / Anthropic Claude / any OpenAI-compatible endpoint, served from a
 local HTTPS server instead of the official CDN. GLM (ZhipuAI) is retained
 as an optional backend.
 
+> **Disclaimer:** This project is an open-source local Excel add-in rewritten based on GLM in Excel (Beta). It is not affiliated with GLM officially and is for learning and reference only — commercial use is prohibited.
+
+## Demo
+
+### Natural Language → Formula
+Describe what you need in plain language — AI generates SUMPRODUCT, AVERAGEIFS, INDEX/MATCH and more.
+
+![Formula Generation](demo-data/demo1动画.gif)
+
+### Data Cleaning & Standardization
+Inconsistent names, phone formats, dates? AI batch-cleans messy data in seconds.
+
+![Data Cleaning](demo-data/demo2动画.gif)
+
+### Multi-Model Switching
+Run the same task on GPT-4o, Claude, and GLM-4 side by side — pick the model that works best for you.
+
+![Multi-Model](demo-data/demo3动画.gif)
+
+### Local-First · Data Privacy
+Sensitive data like salaries and IDs stays on your machine. AI requests go through a local proxy — nothing leaves your computer.
+
+![Local Privacy](demo-data/demo4动画.gif)
+
 ## How it works
 
 The official add-in loads its frontend from `office-addin.bigmodel.cn` on
