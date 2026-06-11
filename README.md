@@ -1,6 +1,12 @@
 # GLM Excel Custom — Multi-Provider Add-in
 
-A local patch of the official “GLM in Excel” Office add-in that unlocks
+[English](#english) | [中文](#中文)
+
+---
+
+## English
+
+A local patch of the official "GLM in Excel" Office add-in that unlocks
 OpenAI / Anthropic Claude / any OpenAI-compatible endpoint, served from a
 local HTTPS server instead of the official CDN. GLM (ZhipuAI) is retained
 as an optional backend.
@@ -95,7 +101,7 @@ API key:   your-key
 - **P4–P8** — removes upstream GLM/ZhipuAI branding; customize these in
   `patch.py` to add your own
 - **P9** — copyright line
-- **P10** — removes the upstream “beta” badge
+- **P10** — removes the upstream "beta" badge
 - **P11** — default config (shown on first launch before any settings are saved)
 
 Re-run `python patch.py` at any time to rebuild `taskpane-DG2CZyG2.js` from
@@ -127,7 +133,7 @@ Produces `installer/dist/AI-Excel-Setup.exe`. When run it:
 - Embeds the entire frontend into a Node SEA binary (`AIExcelServer.exe`)
 - Creates desktop and Start Menu shortcuts
 
-To uninstall: **Start Menu → AI in Excel → 卸载 AI in Excel**
+To uninstall: **Start Menu → AI in Excel → Uninstall AI in Excel**
 
 Key design choices:
 - **No admin**: cert goes into `CurrentUser\Root`, files into
@@ -154,3 +160,112 @@ under the **MIT License**. The original GLM in Excel frontend bundle
 (`taskpane-DG2CZyG2.js.orig`) is copyright ZhipuAI and is included here
 solely for patching purposes under fair use / personal modification.
 
+---
+
+## 中文
+
+本项目是基于「GLM in Excel」官方 Office 插件的开源本地补丁，解锁了 OpenAI / Anthropic Claude / 任意 OpenAI 兼容端点支持，通过本地 HTTPS 服务器提供服务（替代官方 CDN）。GLM（智谱AI）作为可选后端保留。
+
+> **免责声明：** 本项目是基于 GLM in Excel（Beta）重写的开源本地 Excel 插件，和 GLM 官方无关，仅供学习参考，禁止商业使用。
+
+## 演示
+
+### 自然语言生成公式
+用一句话描述需求，AI 自动生成 SUMPRODUCT、AVERAGEIFS、INDEX/MATCH 等高级公式。
+
+![公式生成](demo-data/demo1动画.gif)
+
+### 数据清洗与标准化
+姓名大小写混乱、手机号格式不统一、日期五花八门？AI 一键批量清洗。
+
+![数据清洗](demo-data/demo2动画.gif)
+
+### 多模型自由切换
+同一任务可用 GPT-4o、Claude、GLM-4 分别处理并对比效果，选最适合你的模型。
+
+![多模型切换](demo-data/demo3动画.gif)
+
+### 本地运行 · 数据隐私
+薪资、身份证等敏感数据全程本地处理，AI 请求经本地代理转发，数据永远不离开你的电脑。
+
+![本地隐私](demo-data/demo4动画.gif)
+
+## 工作原理
+
+官方插件每次使用时都从 `office-addin.bigmodel.cn` 加载前端，无法直接修改。本项目：
+
+1. 将前端包保存到本地 `public/` 目录
+2. 用 `patch.py` 打补丁 —— 解锁设置界面，增加多供应商支持和字段 `?` 提示
+3. 通过本地 HTTPS 服务器（`server.cjs`，默认端口 3000）提供服务
+4. 注册自定义 manifest（`manifest/manifest.xml`），让 Excel 指向 `https://localhost:PORT`
+
+内置 CORS 反向代理 `/proxy/<domain>/...` 用于调用不支持跨域的 API。
+
+## 快速开始（开发者）
+
+**前提条件：** Node.js 22+，Windows + Microsoft Excel。
+
+```cmd
+:: 1. 生成自签名 localhost 证书（仅需一次）
+cd installer
+powershell -ExecutionPolicy Bypass -File gen-cert.ps1
+cd ..
+
+:: 2. 注册 sideload 清单
+npx office-addin-dev-settings register manifest/manifest.xml
+
+:: 3. 启动本地服务器（使用插件期间保持窗口开启）
+start-server.cmd
+```
+
+打开 Excel → **开始** 选项卡 → **加载项** → **AI in Excel** → **设置** → 输入 API 密钥。
+
+## 供应商与 CORS 代理
+
+在设置中切换供应商时，Base URL 会通过本地代理自动填写：
+
+| 供应商 | 自动填写的 Base URL |
+|---|---|
+| GLM（智谱AI） | 官方端点（直连，已支持 CORS） |
+| OpenAI | `https://localhost:PORT/proxy/api.openai.com/v1` |
+| Anthropic Claude | `https://localhost:PORT/proxy/api.anthropic.com` |
+| OpenAI 兼容端点 | `https://localhost:PORT/proxy/<你的中继域名>` |
+
+代理在服务器端转发请求（无跨域限制），并自动添加必要的 CORS 响应头。
+
+使用 OpenRouter 中转示例：
+```
+供应商:   OpenAI-compatible
+Base URL: https://localhost:3000/proxy/openrouter.ai/api/v1
+模型:     openai/gpt-4o
+API 密钥: your-key
+```
+
+## 一键安装包（普通用户）
+
+无需安装 Node，无需管理员权限：
+
+```cmd
+cd installer
+build.cmd
+```
+
+生成 `installer/dist/AI-Excel-Setup.exe`。运行后：
+
+- 自动选择 3000–3099 中的空闲端口
+- 将自签名证书安装到当前用户信任区
+- 将整个前端嵌入 Node SEA 可执行文件
+- 创建桌面和开始菜单快捷方式
+
+卸载：**开始菜单 → AI in Excel → 卸载 AI in Excel**
+
+## 注意事项
+
+- `localhost.pfx` 证书密码：`localdev`（在 `gen-cert.ps1` 和 `server.cjs` 中配置）
+- 移除 sideload：`npx office-addin-dev-settings unregister manifest/manifest.xml`
+- 还原原始 JS：`copy public\assets\taskpane-DG2CZyG2.js.orig public\assets\taskpane-DG2CZyG2.js`
+- 代理使用直连方式（绕过系统代理）。如需通过本地代理（如 Clash 127.0.0.1:7897），在 `server.cjs` 中添加 `undici` `ProxyAgent`。
+
+## 许可证
+
+本仓库中的补丁脚本、服务器和安装程序代码以 **MIT 许可证** 发布。原始 GLM in Excel 前端包（`taskpane-DG2CZyG2.js.orig`）版权归智谱AI所有，仅出于补丁目的包含在此，属于合理使用 / 个人修改范畴。
