@@ -83,11 +83,25 @@ Switching the provider in Settings auto-fills the base URL via the local proxy:
 The proxy at `/proxy/<domain>/<path>` forwards server-side (no CORS
 restrictions) and adds the necessary CORS response headers.
 
+**HTTP relay support:** For relays that only serve HTTP (not HTTPS), prefix
+the path with `http:/`:
+```
+https://localhost:3000/proxy/http:/10.22.68.139:8080/v1
+```
+
 Example — using an OpenRouter relay:
 ```
 Provider:  OpenAI-compatible
 Base URL:  https://localhost:3000/proxy/openrouter.ai/api/v1
 Model:     openai/gpt-4o
+API key:   your-key
+```
+
+Example — using an internal HTTP relay:
+```
+Provider:  OpenAI-compatible
+Base URL:  https://localhost:3000/proxy/http:/10.22.68.139:8080/v1
+Model:     your-model-name
 API key:   your-key
 ```
 
@@ -233,11 +247,24 @@ start-server.cmd
 
 代理在服务器端转发请求（无跨域限制），并自动添加必要的 CORS 响应头。
 
+**HTTP 中转站支持：** 对于只提供 HTTP 服务（非 HTTPS）的中转站，在路径中加上 `http:/` 前缀：
+```
+https://localhost:3000/proxy/http:/10.22.68.139:8080/v1
+```
+
 使用 OpenRouter 中转示例：
 ```
 供应商:   OpenAI-compatible
 Base URL: https://localhost:3000/proxy/openrouter.ai/api/v1
 模型:     openai/gpt-4o
+API 密钥: your-key
+```
+
+使用内网 HTTP 中转站示例：
+```
+供应商:   OpenAI-compatible
+Base URL: https://localhost:3000/proxy/http:/10.22.68.139:8080/v1
+模型:     你的模型名
 API 密钥: your-key
 ```
 
