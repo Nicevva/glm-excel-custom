@@ -65,7 +65,10 @@ const STRIP_RES = new Set(["content-encoding", "content-length", "transfer-encod
 async function handleProxy(req, res, rest) {
   const qIndex = req.url.indexOf("?");
   const query = qIndex >= 0 ? req.url.slice(qIndex) : "";
-  const target = "https://" + rest + query;
+  /* support http:// targets: /proxy/http:/host/path -> http://host/path */
+  const isHttp = rest.startsWith("http:/");
+  const target = isHttp ? "http://" + rest.slice(6).replace(/^\/+/, "") + query
+                        : "https://" + rest + query;
   if (req.method === "OPTIONS") { setCors(res, req); res.writeHead(204); res.end(); return; }
   const chunks = [];
   for await (const c of req) chunks.push(c);
