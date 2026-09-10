@@ -71,28 +71,28 @@ Open Excel → **Home** tab → **AI in Excel** → **Settings** → enter your 
 
 ## Providers & CORS proxy
 
-Switching the provider in Settings auto-fills the base URL via the local proxy:
+Enter the provider's **real HTTP or HTTPS API base URL** in Settings.
+The app handles the local proxy automatically; do not manually add a proxy
+prefix or local server port. Switching providers fills these defaults:
 
 | Provider | Auto-filled base URL | Recommended Model |
 |---|---|---|
-| GLM (ZhipuAI) | official endpoint (CORS-enabled, direct) | GLM-5 / GLM-5.1 |
-| OpenAI | `https://localhost:PORT/proxy/api.openai.com/v1` | GPT-5.3 codex |
-| Anthropic Claude | `https://localhost:PORT/proxy/api.anthropic.com` | claude-4.7 / claude-4.6 |
-| OpenAI-compatible | `https://localhost:PORT/proxy/<your-relay-domain>` | Depends on relay |
+| GLM (ZhipuAI) | `https://open.bigmodel.cn/api/paas/v4/` (direct) | GLM-5 / GLM-5.1 |
+| OpenAI | `https://api.openai.com/v1` | GPT-5.3 codex |
+| Anthropic Claude | `https://api.anthropic.com` | claude-4.7 / claude-4.6 |
+| OpenAI-compatible | Empty — enter your provider's real URL | Depends on relay |
 
-The proxy at `/proxy/<domain>/<path>` forwards server-side (no CORS
-restrictions) and adds the necessary CORS response headers.
-
-**HTTP relay support:** For relays that only serve HTTP (not HTTPS), prefix
-the path with `http:/`:
-```
-https://localhost:3000/proxy/http:/10.22.xx.xx:8080/v1
-```
+HTTP relays, ports and provider-specific paths are supported. OpenAI-compatible
+APIs generally require `/v1`; use the path supplied by your provider (the app
+does not add it automatically). For Anthropic, a single trailing `/v1` is handled
+automatically to avoid a duplicate `/v1/messages` path. Do not include credentials,
+query parameters, fragments, or a complete request endpoint such as `/chat/completions`.
+Old local proxy URLs are recognized automatically, including an old local server port.
 
 Example — using an OpenRouter relay:
 ```
 Provider:  OpenAI-compatible
-Base URL:  https://localhost:3000/proxy/openrouter.ai/api/v1
+Base URL:  https://openrouter.ai/api/v1
 Model:     openai/gpt-4o
 API key:   your-key
 ```
@@ -100,7 +100,7 @@ API key:   your-key
 Example — using an internal HTTP relay:
 ```
 Provider:  OpenAI-compatible
-Base URL:  https://localhost:3000/proxy/http:/10.22.xx.xx:8080/v1
+Base URL:  http://10.0.0.10:8080/v1
 Model:     your-model-name
 API key:   your-key
 ```
@@ -117,6 +117,8 @@ API key:   your-key
 - **P9** — copyright line
 - **P10** — removes the upstream "beta" badge
 - **P11** — default config (shown on first launch before any settings are saved)
+- **P12** — real URL validation/storage and request-only automatic proxy via
+  `public/assets/api-url.js`, including migration of legacy local proxy URLs
 
 Re-run `python patch.py` at any time to rebuild `taskpane-DG2CZyG2.js` from
 the pristine `.orig` backup.
@@ -236,26 +238,26 @@ start-server.cmd
 
 ## 供应商与 CORS 代理
 
-在设置中切换供应商时，Base URL 会通过本地代理自动填写：
+在设置中填写服务商提供的**真实 HTTP 或 HTTPS API 根地址**即可。
+程序自动处理本地代理，无需手动拼接代理前缀或本机服务端口。切换供应商时自动填写：
 
 | 供应商 | 自动填写的 Base URL | 推荐模型 |
 |---|---|---|
-| GLM（智谱AI） | 官方端点（直连，已支持 CORS） | GLM-5 / GLM-5.1 |
-| OpenAI | `https://localhost:PORT/proxy/api.openai.com/v1` | GPT-5.3 codex |
-| Anthropic Claude | `https://localhost:PORT/proxy/api.anthropic.com` | claude-4.7 / claude-4.6 |
-| OpenAI 兼容端点 | `https://localhost:PORT/proxy/<你的中继域名>` | 取决于中转站 |
+| GLM（智谱AI） | `https://open.bigmodel.cn/api/paas/v4/`（直连） | GLM-5 / GLM-5.1 |
+| OpenAI | `https://api.openai.com/v1` | GPT-5.3 codex |
+| Anthropic Claude | `https://api.anthropic.com` | claude-4.7 / claude-4.6 |
+| OpenAI 兼容端点 | 留空，请填写服务商的真实地址 | 取决于中转站 |
 
-代理在服务器端转发请求（无跨域限制），并自动添加必要的 CORS 响应头。
-
-**HTTP 中转站支持：** 对于只提供 HTTP 服务（非 HTTPS）的中转站，在路径中加上 `http:/` 前缀：
-```
-https://localhost:3000/proxy/http:/10.22.xx.xx:8080/v1
-```
+支持 HTTP 中转、端口和服务商自定义路径。OpenAI 兼容接口一般包含 `/v1`，
+请保留服务商提供的路径，程序不会自动补上；Anthropic 地址末尾的单个 `/v1`
+会在请求时自动处理，避免出现重复的 `/v1/messages` 路径。
+地址中不要包含用户名/密码、查询参数、片段或 `/chat/completions` 等完整请求端点。
+旧版本保存的本地代理地址会自动识别，即使其中的本机服务端口已经变化。
 
 使用 OpenRouter 中转示例：
 ```
 供应商:   OpenAI-compatible
-Base URL: https://localhost:3000/proxy/openrouter.ai/api/v1
+Base URL: https://openrouter.ai/api/v1
 模型:     openai/gpt-4o
 API 密钥: your-key
 ```
@@ -263,7 +265,7 @@ API 密钥: your-key
 使用内网 HTTP 中转站示例：
 ```
 供应商:   OpenAI-compatible
-Base URL: https://localhost:3000/proxy/http:/10.22.xx.xx:8080/v1
+Base URL: http://10.0.0.10:8080/v1
 模型:     你的模型名
 API 密钥: your-key
 ```

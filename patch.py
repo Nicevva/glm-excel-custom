@@ -5,7 +5,7 @@
 # What it does:
 #   P1  model-resolution fallback (unknown model name -> default model object)
 #   P2  settings UI: provider select + free Base URL + free model, each with a
-#       "?" help tooltip; provider switch auto-fills the local CORS proxy URL
+#       "?" help tooltip; provider switch auto-fills the real API URL
 #   P3  API-key field gets a "?" help tooltip
 #   Branding (remove GLM/Zhipu identity, use AI-in-Excel / [Author]):
 #   P4  app title constant
@@ -67,12 +67,12 @@ H_PROVIDER = ("选择模型服务商。切换后会自动填好对应接口地�
               "• OpenAI —— 官方 GPT 接口\n"
               "• Anthropic Claude —— 官方 Claude 接口\n"
               "• OpenAI 兼容 / 自定义 —— 任意中转或第三方接口")
-H_BASEURL = ("模型 API 的根地址，SDK 会自动在后面拼接 /v1/messages 等路径。\n"
+H_BASEURL = ("只需填写服务商提供的真实 HTTP / HTTPS API 根地址，程序自动处理本地代理，无需手动拼接。\n"
              "• OpenAI：https://api.openai.com/v1\n"
-             "• Anthropic：https://api.anthropic.com\n"
-             "• 中转 / 第三方：填其提供的地址\n"
-             "若中转报跨域（CORS）错误，改用本地代理（切换供应商会自动填好，端口自动选取）：\n"
-             "<本机地址>/proxy/中转域名")
+             "• Anthropic：https://api.anthropic.com（末尾 /v1 会在请求时自动处理）\n"
+             "• 本地接口：http://127.0.0.1:8080\n"
+             "OpenAI 兼容接口一般含 /v1；请以服务商要求为准，程序不会自动补上。\n"
+             "不要填写密钥、查询参数或 /chat/completions、/messages 等完整请求路径。")
 H_MODEL = ("要使用的模型名称，需与服务商一致。\n"
            "例：gpt-4o、claude-opus-4-5、glm-5\n"
            "中转站请填其支持的模型名。")
@@ -101,17 +101,19 @@ p2_old = ('ie.jsx(Il.Item,{label:r("settings.env"),children:ie.jsx(Tp,{value:v,'
 
 p2_new = (
     'ie.jsx(Il.Item,{label:' + label('"接口提供商 (Provider)"', H_PROVIDER) + ',children:'
-    'ie.jsx(Tp,{value:a,style:{width:"100%"},onChange:V=>{l(V);'
-    'V==="anthropic"?(y(location.origin+"/proxy/api.anthropic.com"),p("claude-opus-4-5")):'
-    'V==="openai"?(y(location.origin+"/proxy/api.openai.com/v1"),p("gpt-4o")):'
-    'V==="GLM"?(y(CE),p("glm-5")):(y(location.origin+"/proxy/"),p(""))},'
+    'ie.jsx(Tp,{value:a,style:{width:"100%"},onChange:V=>{l(V);y(defaultApiBaseUrl(V));'
+    'V==="anthropic"?p("claude-opus-4-5"):V==="openai"?p("gpt-4o"):'
+    'V==="GLM"?p("glm-5"):p("")},'
     'options:[{value:"GLM",label:"GLM (智谱)"},'
     '{value:"openai",label:"OpenAI"},'
     '{value:"anthropic",label:"Anthropic Claude"},'
     '{value:"openai-compatible",label:"OpenAI 兼容 / 自定义"}]})}),'
-    'ie.jsx(Il.Item,{label:' + label('"接口地址 (Base URL)"', H_BASEURL) + ',children:'
-    'ie.jsx(Vp,{value:v,onChange:V=>y(V.target.value),'
-    'placeholder:"切换供应商会自动填入本机代理地址，也可手动改",'
+    'ie.jsx(Il.Item,{label:' + label('"接口地址 (Base URL)"', H_BASEURL) + ','
+    'validateStatus:apiBaseUrlError(v)?"error":void 0,'
+    'help:apiBaseUrlError(v)||("程序自动处理本地代理，无需手动拼接。"+'
+    '(a==="anthropic"?"末尾 /v1 会在请求时自动处理。":"兼容接口一般含 /v1，请按服务商提供的路径填写。")),children:'
+    'ie.jsx(Vp,{value:v,onChange:V=>y(V.target.value),onBlur:()=>y(displayApiBaseUrl(v)),'
+    'placeholder:"例如 "+(defaultApiBaseUrl(a)||"http://127.0.0.1:8080 或 https://api.example.com/v1"),'
     'style:{width:"100%"}})}),'
     'ie.jsx(Il.Item,{label:' + label('r("settings.model")', H_MODEL) + ',children:'
     'ie.jsx(Vp,{value:d,onChange:V=>p(V.target.value),'
@@ -188,9 +190,133 @@ src = lit(src,
 src = lit(src,
           '{provider:WLe,model:zY,apiKey:"",customPrefixUrl:CE,thinking:"none",followMode:!0}',
           ('{provider:"openai-compatible",model:"Pro/zai-org/GLM-5.1",apiKey:"",'
-           'customPrefixUrl:location.origin+"/proxy/api.siliconflow.cn/v1/",'
+           'customPrefixUrl:"https://api.siliconflow.cn/v1/",'
            'thinking:"none",followMode:!0}'),
           "P11 default-config")
+
+# ---- P12: real URL storage/validation + automatic request-only proxy --------
+# URL policy lives in a standalone ES module, not in minified patch strings.
+src = ('import {defaultApiBaseUrl,normalizeApiBaseUrl,displayApiBaseUrl,'
+       'apiBaseUrlError,migrateProviderConfig,providerConfigDraft,isProviderConfigured,requestApiBaseUrl}'
+       ' from "./api-url.js";\n' + src)
+src = lit(src,
+          'return t.followMode===void 0&&(t.followMode=!0),t}',
+          'return t.followMode===void 0&&(t.followMode=!0),migrateProviderConfig(t)}',
+          "P12a migrate-loaded-url")
+src = lit(src,
+          'function zLe(e,t,n,r,o,i){localStorage.setItem(iO,JSON.stringify({provider:e,apiKey:t,model:n,customPrefixUrl:r,thinking:o,followMode:i}))}',
+          ('function zLe(e,t,n,r,o,i){const s={provider:e,apiKey:t,model:n,'
+           'customPrefixUrl:normalizeApiBaseUrl(r),thinking:o,followMode:i};'
+           'return localStorage.setItem(iO,JSON.stringify(s)),s}'),
+          "P12b validate-saved-url")
+src = lit(src,
+          '[v,y]=k.useState(()=>(s==null?void 0:s.customPrefixUrl)||CE)',
+          '[v,y]=k.useState(()=>(s==null?void 0:s.customPrefixUrl)??defaultApiBaseUrl(a))',
+          "P12c retain-empty-custom-url")
+src = lit(src,
+          ('k.useEffect(()=>{a&&c&&d?(zLe(a,c,d,v,m,x),'
+           't({provider:a,apiKey:c,model:d,thinking:m,followMode:x,customPrefixUrl:v}),'
+           'E(!0)):E(!1)},[a,v,c,d,m,x,t])'),
+          ('k.useEffect(()=>{const V={provider:a,apiKey:c,model:d,thinking:m,followMode:x,customPrefixUrl:v};'
+           'isProviderConfigured(V)?(t(zLe(a,c,d,v,m,x)),E(!0)):'
+           '(localStorage.setItem(iO,JSON.stringify(providerConfigDraft(V))),t(null),E(!1))},[a,v,c,d,m,x,t])'),
+          "P12d settings-validation-state")
+src = lit(src,
+          'K=U!=null&&U.provider&&(U!=null&&U.apiKey)&&(U!=null&&U.model)&&(U!=null&&U.customPrefixUrl)?U:null',
+          'K=isProviderConfigured(U)?U:null',
+          "P12e validate-initial-config")
+src = lit(src,
+          'g=k.useCallback(U=>{var be;let K=0,Q;',
+          ('g=k.useCallback(U=>{var be;if(!isProviderConfigured(U)){'
+           'r.current&&(suspendedContext.current={session:c.current,messages:r.current.state.messages.slice()},r.current.abort()),'
+           'r.current=null,s.current=null,i.current=!1,'
+           'n(K=>({...K,providerConfig:null,isStreaming:!1,error:'
+           'U?apiBaseUrlError(U.customPrefixUrl)||"请填写模型和 API 密钥。":'
+           '"请在设置中填写有效接口地址、模型和 API 密钥。"}));return}'
+           'U=migrateProviderConfig(U);let K=0,Q;'),
+          "P12f reject-invalid-request-config")
+src = lit(src,
+          'const te={...Q,baseUrl:U.customPrefixUrl}',
+          'const te={...Q,baseUrl:requestApiBaseUrl(U.customPrefixUrl,U.provider,location.origin)}',
+          "P12g request-boundary-proxy")
+src = lit(src,
+          'v=k.useCallback(U=>{if(i.current)',
+          'v=k.useCallback(U=>{if(!isProviderConfigured(U)){g(U);return}if(i.current)',
+          "P12h clear-invalid-even-while-streaming")
+src = lit(src,
+          'await K.prompt(te),console.log("[Chat] Full context:",K.state.messages)',
+          'if(r.current!==K)return;await K.prompt(te),console.log("[Chat] Full context:",K.state.messages)',
+          "P12i cancel-invalidated-pending-request")
+# Keep model context separately from the disabled Agent. Session identity guards
+# it across new/switch/delete; explicit clear invalidates it immediately.
+src = lit(src,
+          'r=k.useRef(null),o=k.useRef(null),i=k.useRef(!1),s=k.useRef(null),a=k.useRef(null)',
+          'r=k.useRef(null),suspendedContext=k.useRef(null),o=k.useRef(null),i=k.useRef(!1),s=k.useRef(null),a=k.useRef(null)',
+          "P12j suspended-context-ref")
+src = lit(src,
+          'oe=((be=r.current)==null?void 0:be.state.messages)??[];',
+          ('oe=((be=r.current)==null?void 0:be.state.messages)??'
+           '(suspendedContext.current&&suspendedContext.current.session===c.current?'
+           'suspendedContext.current.messages:[]);suspendedContext.current=null;'),
+          "P12k restore-same-session-context")
+src = lit(src,
+          'E=k.useCallback(()=>{var U;y(),(U=r.current)==null||U.reset()',
+          'E=k.useCallback(()=>{var U;suspendedContext.current=null;y(),(U=r.current)==null||U.reset()',
+          "P12l clear-suspended-context")
+# Follow mode is a preference, not a consequence of whether the URL is valid.
+# The last saved draft also covers toggles made after the settings page mounted.
+src = lit(src,
+          'x=((I=e.providerConfig)==null?void 0:I.followMode)??!0;',
+          'x=((I=e.providerConfig)==null?void 0:I.followMode)??(_A()?.followMode)??!0;',
+          "P12m retain-follow-preference")
+# Invalidate before the async operation, not after its session ID is committed:
+# settings may restore a valid URL while the session database call is pending.
+src = lit(src,
+          'try{(U=r.current)==null||U.reset();const K=await vK(a.current);',
+          'try{suspendedContext.current=null;(U=r.current)==null||U.reset();const K=await vK(a.current);',
+          "P12n clear-context-before-new-session")
+src = lit(src,
+          '(K=r.current)==null||K.reset();try{const Q=await qF(U);',
+          'suspendedContext.current=null;(K=r.current)==null||K.reset();try{const Q=await qF(U);',
+          "P12o clear-context-before-switch-session")
+src = lit(src,
+          '(K=r.current)==null||K.reset(),await z3e(c.current);',
+          'suspendedContext.current=null;(K=r.current)==null||K.reset(),await z3e(c.current);',
+          "P12p clear-context-before-delete-session")
+
+# ---- P13: tool details render as text, without lazy Markdown chunks ---------
+# Keep the card, status and collapse behavior; only replace its fenced-code
+# children. JSON data is passed as React text, never interpreted as markup.
+p13_args_old = r'''ie.jsx(lS,{plugins:{code:rN},children:`\`\`\`json
+${JSON.stringify(e.args,null,2)}
+\`\`\``})'''
+p13_args_new = (
+    'ie.jsx("pre",{style:{margin:0,border:0,padding:".5em",maxHeight:"8rem",'
+    'maxWidth:"100%",overflow:"auto",whiteSpace:"pre-wrap",overflowWrap:"anywhere",'
+    'fontSize:"inherit"},children:ie.jsx("code",{style:{fontSize:"inherit",'
+    'fontFamily:"var(--chat-font-mono)"},children:JSON.stringify(e.args,null,2)??""})})'
+)
+src = lit(src, p13_args_old, p13_args_new, "P13a tool-args-plain-text")
+
+# A provided false/0/empty-string/null result is still a result; only undefined
+# means no result yet. Preserve string/CSV output and pretty-print JSON objects.
+p13_result_old = r'''e.result&&ie.jsxs("div",{className:"px-2 py-1.5 text-xs border-t border-(--chat-border)",children:[ie.jsx("div",{className:"text-(--chat-text-muted) text-[10px] uppercase mb-1",children:e.status==="error"?n("message.error"):n("message.result")}),ie.jsx("div",{className:`markdown-content max-h-40 overflow-y-auto **:data-[streamdown=code-block]:my-0 **:data-[streamdown=code-block]:border-0 ${e.status==="error"?"[&_code]:text-red-400!":""}`,children:ie.jsx(lS,{plugins:{code:rN},children:`\`\`\`json
+${e.result}
+\`\`\``})})]})'''
+p13_result_new = (
+    'e.result!==void 0&&ie.jsxs("div",{className:"px-2 py-1.5 text-xs border-t border-(--chat-border)",'
+    'children:[ie.jsx("div",{className:"text-(--chat-text-muted) text-[10px] uppercase mb-1",'
+    'children:e.status==="error"?n("message.error"):n("message.result")}),'
+    'ie.jsx("div",{className:`markdown-content max-h-40 overflow-y-auto '
+    '**:data-[streamdown=code-block]:my-0 **:data-[streamdown=code-block]:border-0 '
+    '${e.status==="error"?"[&_code]:text-red-400!":""}`,children:'
+    'ie.jsx("pre",{style:{margin:0,border:0,padding:".5em",maxHeight:"10rem",'
+    'maxWidth:"100%",overflow:"auto",whiteSpace:"pre-wrap",overflowWrap:"anywhere",'
+    'fontSize:"inherit"},children:ie.jsx("code",{style:{fontSize:"inherit",'
+    'fontFamily:"var(--chat-font-mono)"},children:typeof e.result==="string"?'
+    'e.result:JSON.stringify(e.result,null,2)??""})})})]})'
+)
+src = lit(src, p13_result_old, p13_result_new, "P13b tool-result-plain-text")
 
 with io.open(PATH, "w", encoding="utf-8") as f:
     f.write(src)
