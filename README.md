@@ -156,15 +156,22 @@ requires Windows, Node.js 22+, built-in IExpress, and an already-installed
 `postject@1.0.0-alpha.6`. The build never downloads tools: it uses that version
 under local `node_modules/postject`, or an explicitly selected trusted cached CLI.
 
-`installer/certificate.ps1` is a required source input; an incomplete checkout
-fails before build tools run rather than falling back to a shared certificate.
+`installer/certificate.ps1`, `installer/startup.ps1` and `installer/options.ps1`
+are required source inputs; an incomplete checkout fails before build tools run.
+The default build contains no shared certificate. Installation defaults to a new
+independent localhost certificate; the optional bundled shared certificate is for
+compatibility only, never an automatic fallback.
 
 ```cmd
 :: From the project root.
 installer\build.cmd
 
 :: Offline cached tool; separate output preserves an existing setup executable.
-installer\build.cmd --postject-path "C:\tools\postject\dist\cli.js" --output "C:\builds\AI-Excel-Setup-20260910-safe.exe"
+installer\build.cmd --postject-path "C:\tools\postject\dist\cli.js" --output "C:\builds\AI-Excel-Setup-independent.exe"
+
+:: Explicit compatibility package: CONTAINS AN EXTRACTABLE SHARED PRIVATE KEY.
+:: Input directory must contain localhost.pfx, localhost.crt, cert.thumbprint.
+installer\build.cmd --shared-cert-dir "C:\build-inputs\fresh-shared-localhost" --postject-path "C:\tools\postject\dist\cli.js" --output "C:\builds\AI-Excel-Setup-shared.exe"
 
 :: Optional: requires Python and the pristine upstream .orig file.
 installer\build.cmd --patch --postject-path "C:\tools\postject\dist\cli.js"
@@ -181,28 +188,72 @@ and remove them yourself; this build does not make them safe to distribute.
 Each run creates its own `installer/build/package-*/payload` and an absolute-path
 SED, leaving both for inspection. Default builds reuse the committed bundle and
 icons: no Python, Pillow, icon regeneration, or certificate generation. The SEA
-asset allowlist excludes backups, certificates, keys and development/test inputs.
-The IExpress payload is **exactly seven files**:
+asset allowlist excludes backups, certificates, keys and development/test inputs,
+including when `--shared-cert-dir` is used.
+
+The default IExpress payload is **exactly nine files**:
 
 `AIExcelCustom.exe`, `install.ps1`, `uninstall.ps1`, `launch.vbs`,
-`manifest.template.xml`, `app.ico`, `certificate.ps1`.
+`manifest.template.xml`, `app.ico`, `certificate.ps1`, `startup.ps1`, `options.ps1`.
 
-No PFX/CRT, thumbprint, private key, `certs/`, `gen-cert.ps1` wrapper, historical
-`install.log`, port file or runtime state is included.
+Only `--shared-cert-dir PATH` adds **exactly three files (twelve total)**:
+
+| Explicit input | Packaged name |
+|---|---|
+| `localhost.pfx` | `shared-localhost.pfx` |
+| `localhost.crt` | `shared-localhost.crt` |
+| `cert.thumbprint` | `shared-cert.thumbprint` |
+
+The checked-in `app.sed` stays at nine files; the builder generates only the three
+additional FILE9–11 declarations/references, never a wildcard. Other files in the
+explicit directory are not copied. Neither mode includes `certs/`, `gen-cert.ps1`,
+historical logs, port files or runtime state. Without the option, no PFX/CRT or
+thumbprint is bundled and the installer disables the shared-certificate choice
+with an explanation. Old `dist` or user certificates are never selected automatically.
+
+**Warning: a shared-certificate package contains a private key that anyone with
+the package can extract. It is not a private-key-free package or a safe default
+key.** Use a freshly created compatibility-only key, never a real user's or an old
+package's certificate. The fixed PFX password `localdev` is not a secret. Do not
+commit a real PFX or generated private-key material to Git. Shared-mode staging
+also contains the key, even if later packaging fails.
+
+Before tools/staging, the build requires three nonempty regular input files,
+checks the 40-hex fingerprint against the X.509 CRT, requires an explicit localhost
+DNS SAN (not a CN fallback), rejects certificates that Node classifies as CA or
+outside their validity period, and parses the PFX with
+Node TLS using `localdev`. It logs only public fingerprint/validity/SAN information,
+not the key. These are **prechecks**, not full PFX/CRT-pair or extension validation;
+the installer separately verifies the matching key/certificate, explicit non-CA
+constraints and certificate usages before trusting anything. Build validation
+does not import certificates, change trust stores, or open a network listener.
 
 Installation selects a free port (3000–3099), places per-user files under
 `%LOCALAPPDATA%\AIExcelCustom`, registers the sideload in HKCU, and creates desktop
-and Start Menu shortcuts. The frontend is embedded in the Node SEA binary
-`AIExcelCustom.exe`. Certificate creation happens on the destination machine,
-not the build machine. Uninstall via **Start Menu → AI in Excel → Uninstall AI
-in Excel**.
+and Start Menu shortcuts. The frontend is embedded in `AIExcelCustom.exe`.
+The options dialog defaults to **generate an independent certificate**. Choosing
+**bundled shared certificate** requires a separate risk checkbox on **every
+installation/upgrade**; acceptance is never remembered or prechecked.
+
+**Start at Windows sign-in is off for a new installation.** An upgrade can restore
+the saved startup preference (not the shared-risk acceptance). Enabling it registers
+only this app in the current user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+using `launch.vbs --autostart` to start the local server silently without opening Excel. Turning it off
+or uninstalling removes only the matching app-owned startup registration, not
+other applications' entries. Uninstall via **Start Menu → AI in Excel → Uninstall
+AI in Excel**.
 
 ### Certificate security and upgrades
 
-- **Per-machine keys, never a bundled private key.** Install/uninstall share
-  `installer/certificate.ps1`. Each install/upgrade generates a fresh local key
-  in a new directory and trusts its matching public localhost certificate. Never
-  distribute or copy the generated `certs/` directory.
+- **Independent keys by default.** Install/uninstall share
+  `installer/certificate.ps1`. In independent mode, each install/upgrade generates
+  a fresh local key in a new directory and trusts its matching public localhost
+  certificate. Never distribute or copy the generated `certs/` directory.
+- **Shared mode is an explicit compatibility trade-off.** It installs the bundled
+  shared key instead of generating an independent one. Anyone possessing that
+  package can extract the same key; a localhost restriction or PFX password does
+  not make it secret. Independent mode remains recommended, even in a package
+  that offers shared mode.
 - A PFX password of `localdev` is only a file-format compatibility value, **not a
   secret or an access-control boundary**. Private-key protection depends on ACLs
   limited to the current user and SYSTEM, plus user account security; other
@@ -211,7 +262,8 @@ in Excel**.
   applications too. It is **not app-exclusive trust**. A localhost-only
   certificate does not make installing a root certificate harmless.
 - **Upgrading old shared-certificate releases requires more than replacing the
-  EXE.** Run the new installer to rotate the key. Caught upgrade failures attempt
+  EXE.** Run the new installer in independent mode to rotate away from the shared
+  key. Caught upgrade failures attempt
   rollback; if cleanup or recovery is denied, the error identifies retained
   recovery files and must not be ignored. Only after success does cleanup remove the validated previous certificate and
   the known shared legacy fingerprint from the relevant current-user stores.
@@ -233,11 +285,12 @@ in Excel**.
 
 ## Tests
 
-The complete Windows suite contains **97 tests**, covering URL handling, tool
-details, public-only packaging, certificate ownership, ACLs, upgrade rollback and
-uninstall cleanup. Run with Node's built-in runner and Windows PowerShell 5.1
-(no npm dependencies, Python, real installation or certificate-store changes).
-PKI/store operations are mocked; ephemeral test keys exercise real PFX parsing.
+The Windows suite covers URL handling, tool details, default/shared packaging,
+installation options, certificate ownership, ACLs, startup preferences, upgrade
+rollback and uninstall cleanup. Run with Node's built-in runner and Windows
+PowerShell 5.1 (no npm dependencies, Python, OpenSSL, real installation or
+certificate-store changes). PKI/store operations are mocked; ephemeral .NET test
+keys exercise real PFX parsing without using a certificate store.
 These checks do not replace end-to-end installation testing in an isolated Windows account:
 
 ```cmd
@@ -248,9 +301,12 @@ node --test tests/build-security.test.mjs
 
 Build tests run the actual orchestration against temporary fixture directories
 and fake only the external SEA/postject/IExpress process boundaries. They check
-the exact seven-file package, dirty-dist isolation, private-input exclusions,
-fresh-clone/optional-patch behavior and tool failure handling. They are not a
-replacement for a Windows package/install acceptance test.
+exact nine/twelve-file packages and SED entries, explicit shared-input validation,
+dirty-dist isolation, private-input exclusions, fresh-clone/optional-patch behavior
+and tool failure handling. Shared PFX integration tests use Windows PowerShell's
+in-memory .NET certificate API and are skipped on non-Windows platforms; other
+build tests still run. They are not a replacement for Windows package/install
+acceptance testing.
 
 ## License
 
@@ -369,15 +425,21 @@ API 密钥: your-key
 普通用户运行发布的安装包，无需安装 Node。**构建安装包**需要 Windows、
 Node.js 22+、系统自带 IExpress，以及预先安装的 `postject@1.0.0-alpha.6`。
 构建过程不下载工具：默认使用本地 `node_modules/postject` 中的固定版本，
-也可显式指定可信缓存中的 CLI。`installer/certificate.ps1` 是必需的源码输入，
-缺失时会在运行构建工具前报错，不会退回共用证书方案。
+也可显式指定可信缓存中的 CLI。`installer/certificate.ps1`、`installer/startup.ps1`
+和 `installer/options.ps1` 是必需的源码输入，缺失时会在运行构建工具前报错。
+默认构建不包含共用证书；安装时默认生成全新独立 localhost 证书。
+内置共用证书仅是可选兼容方案，不会自动退回该模式。
 
 ```cmd
 :: 在项目根目录运行。
 installer\build.cmd
 
 :: 使用离线缓存工具，并输出到独立文件，保护已有安装包。
-installer\build.cmd --postject-path "C:\tools\postject\dist\cli.js" --output "C:\builds\AI-Excel-Setup-20260910-safe.exe"
+installer\build.cmd --postject-path "C:\tools\postject\dist\cli.js" --output "C:\builds\AI-Excel-Setup-independent.exe"
+
+:: 显式兼容构建：此包包含任何持包者均可提取的共用私钥。
+:: 输入目录须含 localhost.pfx、localhost.crt、cert.thumbprint。
+installer\build.cmd --shared-cert-dir "C:\build-inputs\fresh-shared-localhost" --postject-path "C:\tools\postject\dist\cli.js" --output "C:\builds\AI-Excel-Setup-shared.exe"
 
 :: 可选：仅重打补丁时需要 Python 和原始 .orig 文件。
 installer\build.cmd --patch --postject-path "C:\tools\postject\dist\cli.js"
@@ -392,37 +454,78 @@ installer\build.cmd --patch --postject-path "C:\tools\postject\dist\cli.js"
 
 每次构建使用独立的 `installer/build/package-*/payload` 和绝对路径 SED，
 保留供检查。普通构建直接复用已提交的前端及图标，**不需要 Python、Pillow
-或 `.orig`**，也不会生成图标或证书。SEA 静态资源白名单排除备份、证书、
-密钥及开发/测试输入。IExpress 安装包**严格只有 7 个载荷文件**：
+或 `.orig`**，也不会生成图标或证书。SEA 静态资源白名单始终排除备份、证书、
+密钥及开发/测试输入，即使显式使用 `--shared-cert-dir` 也不例外。
+
+默认 IExpress 安装包**严格只有 9 个载荷文件**：
 
 `AIExcelCustom.exe`、`install.ps1`、`uninstall.ps1`、`launch.vbs`、
-`manifest.template.xml`、`app.ico`、`certificate.ps1`。
+`manifest.template.xml`、`app.ico`、`certificate.ps1`、`startup.ps1`、`options.ps1`。
 
-不含 PFX/CRT、指纹文件、私钥、`certs/`、`gen-cert.ps1` 包装脚本、历史
-`install.log`、端口或运行状态。公开克隆中的前端已经打好补丁；仅当你拥有
-原始上游 `public/assets/taskpane-DG2CZyG2.js.orig` 时才使用 `--patch`。
+仅显式提供 `--shared-cert-dir PATH` 时，**精确增加以下 3 项，共 12 个文件**：
+
+| 显式输入文件 | 包内名称 |
+|---|---|
+| `localhost.pfx` | `shared-localhost.pfx` |
+| `localhost.crt` | `shared-localhost.crt` |
+| `cert.thumbprint` | `shared-cert.thumbprint` |
+
+源码 `app.sed` 固定基础 9 文件；构建器只生成新增 FILE9–11 的声明和引用，
+不使用通配符，不复制输入目录中的其他文件。两种包都不包含 `certs/`、
+`gen-cert.ps1`、历史日志、端口文件或运行状态。不提供此参数时，不打包
+PFX/CRT 或指纹文件，安装界面的共用证书选项置灰并说明原因；
+构建器不会自动选择旧 `dist` 或用户证书。
+
+**警告：共用证书包内含任何持包者都能提取的私钥，不是“无私钥包”，
+也不是自动默认安全的密钥。** 仅使用全新、专门用于兼容目的的密钥，
+不要复用真实用户或旧安装包的证书。固定 PFX 密码 `localdev` 不是秘密。
+真实 PFX 和生成的私钥材料不要提交到 Git。即使后续打包失败，
+共用模式留下的 staging 目录中也含有私钥。
+
+构建工具在运行子步骤及创建 staging 前，检查三个输入为非空普通文件，
+核对 40 位十六进制指纹与 X.509 CRT 一致，要求显式 localhost DNS SAN
+（不以 CN 代替），拒绝 Node 判定为 CA 或不在有效期内的证书，
+并通过 Node TLS 用 `localdev` 解析 PFX。
+仅记录公开的指纹、有效期和 SAN 信息，不输出私钥。这些只是**预检查**，
+不等于已完成 PFX/CRT 配对及全部扩展校验；安装器在授予信任前还会严格
+核对密钥/证书配对、显式非 CA 约束及证书用途。
+构建校验不导入证书、不修改信任库、不开启网络监听。
+
+公开克隆中的前端已经打好补丁；仅当你拥有原始上游
+`public/assets/taskpane-DG2CZyG2.js.orig` 时才使用 `--patch`。
 `.orig` 不提交、不嵌入 SEA，**不要把已修改的 JS 复制成 `.orig`**。
 
-安装后：
+安装选项及行为：
 
-- 自动选择 3000–3099 中的空闲端口
-- 在目标机器生成新的 localhost 私钥/证书，并信任对应公共证书
-- 将程序安装到 `%LOCALAPPDATA%\AIExcelCustom`，通过 HKCU 注册加载项
+- 默认为**生成独立证书**，在目标机器生成全新 localhost 私钥/证书
+- **内置共用证书**必须在**每次安装或升级**时单独勾选风险确认；
+  不记住接受勾选，也不会预先勾选
+- **登录 Windows 后自启默认关闭**；升级可恢复已保存的自启偏好，
+  但不会恢复共用证书风险确认
+- 开启自启仅注册当前用户 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  中本程序的条目，通过 `launch.vbs --autostart` 静默启动本地服务，**不自动打开 Excel**
+- 关闭自启或卸载时只精确清理与本安装匹配的自启条目，不删除其他应用的条目
+- 自动选择 3000–3099 中的空闲端口，将程序安装到
+  `%LOCALAPPDATA%\AIExcelCustom`，通过 HKCU 注册加载项
 - 前端嵌入 `AIExcelCustom.exe`，创建桌面和开始菜单快捷方式
 
 卸载：**开始菜单 → AI in Excel → 卸载 AI in Excel**
 
 ### 证书安全与旧版本升级
 
-- **每机生成，不随包分发私钥。** 安装与卸载共用 `installer/certificate.ps1`；
-  每次安装/升级在新目录生成并轮换本地密钥，仅信任与之对应的公共证书。
+- **默认生成独立密钥。** 安装与卸载共用 `installer/certificate.ps1`；
+  独立模式每次安装/升级在新目录生成并轮换本地密钥，仅信任与之对应的公共证书。
   不要上传、分发或跨机器复制生成的 `certs/`。
+- **共用模式是显式接受风险的兼容选项。** 此模式安装内置共用密钥，
+  不生成独立密钥；任何持包者均可提取相同密钥。localhost 限定与 PFX 密码
+  不能使它成为秘密。即使安装包提供共用选项，仍推荐使用独立模式。
 - PFX 密码 `localdev` 只是格式兼容值，**不是秘密，也不是安全访问边界**。
   私钥安全依赖仅授予当前用户和 SYSTEM 的文件 ACL，以及账户本身的安全；
   拥有相同用户权限的其他进程仍可能读取它。
 - `CurrentUser\Root` 会影响该用户其他应用的证书验证，**不是本应用独占信任**。
   即使证书限定 localhost，也不能把添加根信任描述成完全无害。
-- **从旧共用证书版本升级不能只替换 EXE。** 请运行新安装器轮换密钥；
+- **从旧共用证书版本升级不能只替换 EXE。** 请运行新安装器，选择独立模式
+  以轮换掉旧共用密钥；
   捕获到升级失败时会尝试回滚；清理或恢复被拒绝时，错误会指出保留的恢复目录，
   不能忽略该提示。仅成功后才按经过验证的旧证书指纹及已知共用证书的精确指纹
   清理相关当前用户证书库。卸载同样使用已验证的指纹，不按 `CN=localhost`
@@ -438,10 +541,11 @@ installer\build.cmd --patch --postject-path "C:\tools\postject\dist\cli.js"
 
 ## 测试
 
-Windows 完整测试共 **97 项**，覆盖 URL、工具详情、无私钥打包、证书归属、
-ACL、升级回滚及卸载清理。使用 Node 自带测试器和 Windows PowerShell 5.1，
-无 npm 依赖，不需要 Python，不执行真实安装或修改证书库。
-PKI/信任库操作使用模拟，临时内存测试密钥用于验证真实 PFX 解析；
+Windows 测试覆盖 URL、工具详情、默认/共用模式打包、安装选项、证书归属、
+ACL、自启偏好、升级回滚及卸载清理。使用 Node 自带测试器和 Windows
+PowerShell 5.1，无 npm 依赖，不需要 Python 或 OpenSSL，不执行真实安装
+或修改证书库。PKI/信任库操作使用模拟，临时 .NET 测试密钥用于验证真实
+PFX 解析，不使用证书库；
 这些检查不能替代隔离 Windows 用户下的完整安装验收：
 
 ```cmd
@@ -451,8 +555,10 @@ node --test tests/build-security.test.mjs
 ```
 
 构建测试在临时 fixture 目录运行真实编排，仅替换外部 SEA/postject/IExpress
-进程边界，验证精确 7 文件、污染 dist 隔离、私密输入排除、公开克隆无需
-`.orig`、可选补丁及子步骤失败处理；不能替代 Windows 真实打包/安装验收。
+进程边界，验证精确 9/12 文件及 SED 引用、显式共用输入校验、污染 dist 隔离、
+私密输入排除、公开克隆无需 `.orig`、可选补丁及子步骤失败处理。
+共用 PFX 集成测试使用 Windows PowerShell 的 .NET 内存证书 API，非 Windows
+仅跳过这些集成例，其余构建测试照常运行；不能替代 Windows 真实打包/安装验收。
 
 ## 许可证
 

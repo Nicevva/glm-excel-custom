@@ -11,6 +11,14 @@ function options(inSea, hasPfx) {
     readFileSync: path => path, require: name => { assert.equal(name, 'node:os'); return { homedir: () => '/home/test' }; } };
   return vm.runInNewContext(`${tls};tlsOptions()`, context);
 }
+const balloon = source.slice(source.indexOf('function balloon('), source.indexOf('\nfunction recoverPort'));
+test('login autostart never opens notification UI while manual launch still can', () => {
+  for (const silent of [true, false]) {
+    const calls = [];
+    vm.runInNewContext(`${balloon};balloon('ready')`, { process: { argv: silent ? ['app.exe', '--autostart'] : ['app.exe'] }, execFileSync: (...args) => calls.push(args) });
+    assert.equal(calls.length, silent ? 0 : 1);
+  }
+});
 test('installed SEA refuses unrelated development certificates when its private key is absent', () => {
   assert.throws(() => options(true, false), /reinstall|重新安装/i);
 });

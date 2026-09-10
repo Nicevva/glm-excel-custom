@@ -118,6 +118,7 @@ async function pickPort(start) {
 }
 
 function balloon(text) {
+  if (process.argv.includes("--autostart")) return;
   // best-effort non-blocking tray balloon; ignore failures
   try {
     const ps = "Add-Type -AssemblyName System.Windows.Forms;" +

@@ -37,6 +37,8 @@ FILE3="launch.vbs"
 FILE4="manifest.template.xml"
 FILE5="app.ico"
 FILE6="certificate.ps1"
+FILE7="startup.ps1"
+FILE8="options.ps1"
 [SourceFiles]
 SourceFiles0=__SOURCE_PATH__
 [SourceFiles0]
@@ -47,3 +49,5 @@ SourceFiles0=__SOURCE_PATH__
 %FILE4%=
 %FILE5%=
 %FILE6%=
+%FILE7%=
+%FILE8%=

@@ -80,6 +80,27 @@ function Get-OwnedCertificateThumbprint {
     } finally { if ($null -ne $cert) { $cert.Dispose() } }
 }
 
+function Set-AIExcelTrustOwnership {
+    param([string]$CertificateDirectory, [string]$Thumbprint, [bool]$Owned)
+    $actual = Get-OwnedCertificateThumbprint -CertificateDirectory $CertificateDirectory -RequireValidEvidence
+    if (-not $actual -or $actual -ne $Thumbprint) { throw 'Cannot record ownership for an unverified certificate.' }
+    $record = @{ Thumbprint = $actual; Owned = $Owned }
+    [IO.File]::WriteAllText((Join-Path $CertificateDirectory 'trust-owner.json'), ($record | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+}
+
+function Get-AIExcelOwnedTrustThumbprint {
+    [CmdletBinding()]
+    param([string]$CertificateDirectory)
+    $thumb = Get-OwnedCertificateThumbprint -CertificateDirectory $CertificateDirectory -RequireValidEvidence
+    if (-not $thumb) { return $null }
+    $path = Join-Path $CertificateDirectory 'trust-owner.json'
+    if (-not (Test-Path -LiteralPath $path)) { return $thumb }
+    $record = [IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+    if ($record.Thumbprint -ne $thumb -or $record.Owned -isnot [bool]) { throw 'Invalid certificate trust ownership record; preserve files for recovery.' }
+    if ($record.Owned) { return $thumb }
+    return $null
+}
+
 function Test-LocalhostCertificateFiles {
     [CmdletBinding()]
     param([string]$CertificateDirectory, [string]$ExpectedThumbprint)
@@ -93,6 +114,10 @@ function Test-LocalhostCertificateFiles {
             throw 'Generated PFX and public certificate do not match.'
         }
         if ($public.NotBefore -gt (Get-Date) -or $public.NotAfter -le (Get-Date)) { throw 'Generated certificate is not currently valid.' }
+        $san = @($public.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.17' })
+        if ($san.Count -ne 1 -or -not [string]::Equals($public.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::DnsFromAlternativeName, $false), 'localhost', [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Localhost certificate must have localhost as its DNS subject alternative name.'
+        }
         $basic = @($public.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.19' })
         $usage = @($public.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.15' })
         $eku = @($public.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' })
@@ -147,6 +172,38 @@ function New-LocalhostCertificate {
             }
         }
     }
+}
+
+# Used only after the installer's explicit shared-private-key acknowledgement.
+# This does not import trust or generate any key; it validates the packaged pair.
+function Copy-SharedLocalhostCertificate {
+    [CmdletBinding()]
+    param([string]$SourceDirectory, [string]$OutputDirectory)
+    $files = @{'shared-localhost.pfx' = 'localhost.pfx'; 'shared-localhost.crt' = 'localhost.crt'; 'shared-cert.thumbprint' = 'cert.thumbprint'}
+    foreach ($name in $files.Keys) {
+        $path = Join-Path $SourceDirectory $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing shared certificate input: $name" }
+        $file = Get-Item -LiteralPath $path
+        if ($file.Length -eq 0 -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Invalid shared certificate input: $name" }
+    }
+    $created = $false
+    try {
+        New-PrivateDirectory -Path $OutputDirectory
+        $created = $true
+        foreach ($name in $files.Keys) { Copy-Item -LiteralPath (Join-Path $SourceDirectory $name) -Destination (Join-Path $OutputDirectory $files[$name]) -ErrorAction Stop }
+        $thumb = Get-OwnedCertificateThumbprint -CertificateDirectory $OutputDirectory -RequireValidEvidence
+        if (-not $thumb -or -not (Test-LocalhostCertificateFiles -CertificateDirectory $OutputDirectory -ExpectedThumbprint $thumb)) { throw 'Shared certificate verification failed.' }
+        return [pscustomobject]@{ Thumbprint = $thumb; CertificatePath = (Join-Path $OutputDirectory 'localhost.crt'); PfxPath = (Join-Path $OutputDirectory 'localhost.pfx') }
+    } catch {
+        if ($created -and (Test-Path -LiteralPath $OutputDirectory)) { Remove-Item -LiteralPath $OutputDirectory -Recurse -Force -ErrorAction Stop }
+        throw
+    }
+}
+
+function Test-AIExcelRootTrusted {
+    param([string]$Thumbprint)
+    if ($Thumbprint -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Invalid certificate fingerprint.' }
+    return Test-Path -LiteralPath ('Cert:\CurrentUser\Root\' + $Thumbprint.ToUpperInvariant())
 }
 
 function Remove-OwnedRootCertificates {

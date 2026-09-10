@@ -85,24 +85,30 @@ function Save-AIExcelShortcuts($InstallDirectory) {
 
 function Install-AIExcelPackage {
     [CmdletBinding()]
-    param([string]$SourceDirectory, [string]$InstallDirectory)
+    param([string]$SourceDirectory, [string]$InstallDirectory,
+        [ValidateSet('independent', 'shared')][string]$CertificateMode = 'independent',
+        [bool]$AcceptSharedRisk = $false, [bool]$AutoStart = $false)
     $lock = Enter-AIExcelInstallLock
-    try { return Install-AIExcelPackageCore -SourceDirectory $SourceDirectory -InstallDirectory $InstallDirectory }
+    try { return Install-AIExcelPackageCore -SourceDirectory $SourceDirectory -InstallDirectory $InstallDirectory -CertificateMode $CertificateMode -AcceptSharedRisk $AcceptSharedRisk -AutoStart $AutoStart }
     finally { Exit-AIExcelInstallLock $lock }
 }
 
 function Install-AIExcelPackageCore {
     [CmdletBinding()]
-    param([string]$SourceDirectory, [string]$InstallDirectory)
-    $files = @('AIExcelCustom.exe', 'launch.vbs', 'uninstall.ps1', 'manifest.template.xml', 'app.ico', 'certificate.ps1')
+    param([string]$SourceDirectory, [string]$InstallDirectory,
+        [ValidateSet('independent', 'shared')][string]$CertificateMode = 'independent',
+        [bool]$AcceptSharedRisk = $false, [bool]$AutoStart = $false)
+    Assert-AIExcelCertificateChoice -CertificateMode $CertificateMode -AcceptSharedRisk $AcceptSharedRisk -SourceDirectory $SourceDirectory
+    $files = @('AIExcelCustom.exe', 'launch.vbs', 'uninstall.ps1', 'manifest.template.xml', 'app.ico', 'certificate.ps1', 'startup.ps1', 'options.ps1')
     foreach ($name in $files) {
         if (-not (Test-Path -LiteralPath (Join-Path $SourceDirectory $name) -PathType Leaf)) { throw "Missing installation input: $name" }
     }
     if ((Test-Path -LiteralPath $InstallDirectory) -and ((Get-Item -LiteralPath $InstallDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw 'Refusing to replace an installation directory that is a reparse point.'
     }
-    $oldThumb = Get-OwnedCertificateThumbprint -CertificateDirectory (Join-Path $InstallDirectory 'certs') -RequireValidEvidence
+    $oldThumb = Get-AIExcelOwnedTrustThumbprint -CertificateDirectory (Join-Path $InstallDirectory 'certs')
     $previousRegistration = Get-AIExcelRegistration -InstallDirectory $InstallDirectory
+    $previousAutoStart = Get-AIExcelAutoStartState
     $shortcuts = @{}
     foreach ($path in @(Get-AIExcelShortcutPaths)) {
         $shortcuts[$path] = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllBytes($path) } else { $null }
@@ -113,6 +119,8 @@ function Install-AIExcelPackageCore {
     $backup = Join-Path $stage 'previous'
     $newCert = $null
     $trustAttempted = $false
+    $trustWasPresent = $false
+    $autoStartAttempted = $false
     $oldMoved = $false
     $newMoved = $false
     $registrationAttempted = $false
@@ -122,7 +130,11 @@ function Install-AIExcelPackageCore {
     try {
         New-PrivateDirectory -Path $fresh
         foreach ($name in $files) { Copy-Item -LiteralPath (Join-Path $SourceDirectory $name) -Destination (Join-Path $fresh $name) -ErrorAction Stop }
-        $newCert = New-LocalhostCertificate -OutputDirectory (Join-Path $fresh 'certs')
+        $newCert = if ($CertificateMode -eq 'shared') {
+            Copy-SharedLocalhostCertificate -SourceDirectory $SourceDirectory -OutputDirectory (Join-Path $fresh 'certs')
+        } else { New-LocalhostCertificate -OutputDirectory (Join-Path $fresh 'certs') }
+        $savedOptions = @{ CertificateMode = $CertificateMode; AutoStart = $AutoStart }
+        [IO.File]::WriteAllText((Join-Path $fresh 'install-options.json'), ($savedOptions | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
         # Public-only recovery proof survives removal of the newly installed files.
         $proof = Join-Path $stage 'new-trust'
         New-PrivateDirectory -Path $proof
@@ -132,7 +144,10 @@ function Install-AIExcelPackageCore {
         if (-not $template.Contains('__PORT__')) { throw 'Invalid installation manifest template.' }
         [IO.File]::WriteAllText((Join-Path $fresh 'manifest.xml'), $template.Replace('__PORT__', [string]$port), [Text.UTF8Encoding]::new($true))
         [IO.File]::WriteAllText((Join-Path $fresh 'port.txt'), [string]$port, [Text.Encoding]::ASCII)
-        # Import only the newly generated public certificate; old trust remains until commit.
+        # Existing shared trust is not ours to retract if this upgrade fails.
+        $trustWasPresent = Test-AIExcelRootTrusted -Thumbprint $newCert.Thumbprint
+        $ownsTrust = -not $trustWasPresent -or $oldThumb -eq $newCert.Thumbprint
+        Set-AIExcelTrustOwnership -CertificateDirectory (Join-Path $fresh 'certs') -Thumbprint $newCert.Thumbprint -Owned $ownsTrust
         $trustAttempted = $true
         $trusted = @(Import-Certificate -FilePath $newCert.CertificatePath -CertStoreLocation 'Cert:\CurrentUser\Root' -ErrorAction Stop)
         if (@($trusted | Where-Object { $_.Thumbprint -eq $newCert.Thumbprint }).Count -ne 1) { throw 'New certificate trust was not confirmed.' }
@@ -147,6 +162,8 @@ function Install-AIExcelPackageCore {
         Set-AIExcelRegistration -InstallDirectory $InstallDirectory
         $shortcutsAttempted = $true
         Save-AIExcelShortcuts -InstallDirectory $InstallDirectory
+        $autoStartAttempted = $true
+        Set-AIExcelAutoStart -InstallDirectory $InstallDirectory -Enabled $AutoStart
     } catch {
         $failure = $_
         if ($failure.Exception.Data['CertificateRecoveryDirectory']) {
@@ -165,6 +182,10 @@ function Install-AIExcelPackageCore {
             $preserveStage = $true
             Write-Warning ("File rollback needs manual recovery; backup retained at {0}: {1}" -f $stage, $_.Exception.Message)
         }
+        if ($autoStartAttempted) {
+            try { Restore-AIExcelAutoStartState -Previous $previousAutoStart }
+            catch { $preserveStage = $true; Write-Warning ('Login startup rollback failed: ' + $_.Exception.Message) }
+        }
         if ($registrationAttempted) {
             try { Restore-AIExcelRegistration -InstallDirectory $InstallDirectory -Previous $previousRegistration }
             catch { $preserveStage = $true; Write-Warning ('Registration rollback failed: ' + $_.Exception.Message) }
@@ -180,7 +201,7 @@ function Install-AIExcelPackageCore {
         if (-not $filesRestored -and $null -ne $newCert) {
             Write-Warning ('New trust retained because its installation files could not be removed: ' + $newCert.Thumbprint)
         }
-        if ($filesRestored -and $trustAttempted -and $null -ne $newCert) {
+        if ($filesRestored -and $trustAttempted -and -not $trustWasPresent -and $null -ne $newCert) {
             try { Remove-OwnedRootCertificates -Thumbprints @($newCert.Thumbprint) }
             catch { $preserveStage = $true; Write-Warning ("Could not retract new certificate {0}: {1}" -f $newCert.Thumbprint, $_.Exception.Message) }
         }
@@ -201,7 +222,7 @@ function Install-AIExcelPackageCore {
         $cleanupWarning = "旧证书清理未完成；请保留备份目录 $stage。指纹：$($obsolete -join ', ')。$($_.Exception.Message)"
         Write-Warning $cleanupWarning
     }
-    return [pscustomobject]@{ Port = $port; Thumbprint = $newCert.Thumbprint; CleanupWarning = $cleanupWarning }
+    return [pscustomobject]@{ Port = $port; Thumbprint = $newCert.Thumbprint; CleanupWarning = $cleanupWarning; CertificateMode = $CertificateMode; AutoStart = $AutoStart }
 }
 
 # No certificate-store changes occur until the user runs the installer.
@@ -212,9 +233,16 @@ if ($MyInvocation.InvocationName -ne '.') {
         '===== AI in Excel install =====' | Out-File -FilePath $script:LogPath -Encoding UTF8
         if (-not [Type]::GetTypeFromProgID('Excel.Application')) { throw '未检测到 Microsoft Excel，请先安装 Office 桌面版。' }
         . (Join-Path $PSScriptRoot 'certificate.ps1')
-        $result = Install-AIExcelPackage -SourceDirectory $PSScriptRoot -InstallDirectory (Join-Path $env:LOCALAPPDATA 'AIExcelCustom')
-        Log ('DONE OK; port=' + $result.Port)
-        $message = "安装完成（端口 $($result.Port)）。`n本机已生成独立的 HTTPS 证书。`n`n请双击桌面【启动 AI in Excel】，然后重新打开 Excel。"
+        . (Join-Path $PSScriptRoot 'startup.ps1')
+        . (Join-Path $PSScriptRoot 'options.ps1')
+        $installDirectory = Join-Path $env:LOCALAPPDATA 'AIExcelCustom'
+        $choice = Show-AIExcelInstallOptions -InstallDirectory $installDirectory -SourceDirectory $PSScriptRoot
+        if ($null -eq $choice) { exit 0 }
+        $result = Install-AIExcelPackage -SourceDirectory $PSScriptRoot -InstallDirectory $installDirectory -CertificateMode $choice.CertificateMode -AcceptSharedRisk $choice.AcceptSharedRisk -AutoStart $choice.AutoStart
+        Log ('DONE OK; port=' + $result.Port + '; certificateMode=' + $result.CertificateMode + '; autoStart=' + $result.AutoStart)
+        $certificateMessage = if ($result.CertificateMode -eq 'shared') { '已按你的选择使用内置共用证书（私钥可被提取）。' } else { '本机已生成独立的 HTTPS 证书。' }
+        $startupMessage = if ($result.AutoStart) { '已启用登录 Windows 后静默启动后台服务。' } else { '未启用登录自启。' }
+        $message = "安装完成（端口 $($result.Port)）。`n$certificateMessage`n$startupMessage`n`n请双击桌面【启动 AI in Excel】，然后重新打开 Excel。"
         if ($result.CleanupWarning) { $message += "`n`n注意：" + $result.CleanupWarning; Log $result.CleanupWarning }
         [System.Windows.Forms.MessageBox]::Show($message, 'AI in Excel 安装') | Out-Null
     } catch {

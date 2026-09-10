@@ -8,12 +8,14 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { X509Certificate } from "node:crypto";
 
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const payload = [
   "AIExcelCustom.exe", "install.ps1", "uninstall.ps1", "launch.vbs",
-  "manifest.template.xml", "app.ico", "certificate.ps1",
+  "manifest.template.xml", "app.ico", "certificate.ps1", "startup.ps1", "options.ps1",
 ];
+const sharedPayload = ["shared-localhost.pfx", "shared-localhost.crt", "shared-cert.thumbprint"];
 
 function scratch(t) {
   const root = mkdtempSync(join(tmpdir(), "glm-build-security-"));
@@ -61,10 +63,10 @@ test("SEA includes runtime static assets, not certificates, backups or developer
 });
 
 // Break caught: IExpress's declared inputs include shared secrets or omit the helper.
-test("checked-in SED declares exactly the seven public installer payloads", () => {
+test("checked-in SED declares exactly the nine base installer payloads", () => {
   const text = readFileSync(join(repository, "installer/app.sed"), "utf8");
   assert.deepEqual(sedFiles(text), payload);
-  assert.deepEqual([...text.matchAll(/^%FILE(\d+)%=\r?$/gm)].map(match => Number(match[1])), [0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual([...text.matchAll(/^%FILE(\d+)%=\r?$/gm)].map(match => Number(match[1])), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
 async function builder() {
@@ -83,7 +85,7 @@ function fixture(t) {
   put(root, "public/assets/taskpane-DG2CZyG2.js", "// committed patched bundle\n");
   put(root, "public/assets/api-url.js", "// helper\n");
   put(root, "manifest/manifest.xml", '<url>https://localhost:3000/taskpane.html</url>');
-  for (const name of ["install.ps1", "uninstall.ps1", "launch.vbs", "app.ico", "certificate.ps1"]) {
+  for (const name of ["install.ps1", "uninstall.ps1", "launch.vbs", "app.ico", "certificate.ps1", "startup.ps1", "options.ps1"]) {
     put(root, `installer/${name}`, `fixture ${name}; no certificate operations`);
   }
   copyFileSync(join(repository, "installer/app.sed"), join(root, "installer/app.sed"));
@@ -117,7 +119,8 @@ function fixture(t) {
       assert.ok(isAbsolute(source));
       assert.ok(isAbsolute(target));
       const files = sedFiles(sed);
-      assert.deepEqual(readdirSync(source).sort(), [...payload].sort());
+      assert.deepEqual(readdirSync(source).sort(), [...files].sort());
+      assert.deepEqual([...sed.matchAll(/^%FILE(\d+)%=\r?$/gm)].map(match => Number(match[1])), files.map((_, index) => index));
       writeFileSync(target, JSON.stringify(Object.fromEntries(files.map(name => [name, readFileSync(join(source, name), "utf8")]))));
     } else {
       assert.fail(`unexpected external command: ${command} ${args.join(" ")}`);
@@ -128,7 +131,7 @@ function fixture(t) {
 }
 
 // Break caught: the default build invokes Python/cert tools or packages stale dist.
-test("default build uses the committed bundle and fresh seven-file staging despite polluted dist", async t => {
+test("default build uses the committed bundle and fresh nine-file staging despite polluted dist", async t => {
   const buildInstaller = await builder();
   const f = fixture(t);
   for (const name of ["localhost.pfx", "localhost.crt", "cert.thumbprint", "certs/private.key", "install.log", "port.txt", "manifest.xml", "AI-Excel-Setup.exe"]) {
@@ -158,6 +161,148 @@ test("default build uses the committed bundle and fresh seven-file staging despi
   assert.notEqual(result.stageDir, second.stageDir);
 });
 
+// Test-only .NET keys stay in memory and temporary files; never use a certificate store.
+function sharedCertificate(root, { ca = false, expired = false, san = "localhost" } = {}) {
+  const directory = join(root, "explicit shared inputs");
+  mkdirSync(directory);
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$dir = '${directory.replaceAll("'", "''")}'
+$rsa = [Security.Cryptography.RSA]::Create(2048)
+$cert = $null
+try {
+  $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=localhost', $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+  $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($${ca}, $false, 0, $true))
+  $usage = [Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature -bor [Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyEncipherment
+  if ($${ca}) { $usage = $usage -bor [Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyCertSign }
+  $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new($usage, $true))
+  $oids = [Security.Cryptography.OidCollection]::new()
+  $oids.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1')) | Out-Null
+  $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($oids, $false))
+  ${san === null ? "" : `
+  $san = [Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+  $san.AddDnsName('${san.replaceAll("'", "''")}'); $san.AddIpAddress([Net.IPAddress]::Loopback); $san.AddIpAddress([Net.IPAddress]::IPv6Loopback)
+  $request.CertificateExtensions.Add($san.Build())`}
+
+  $cert = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-2), [DateTimeOffset]::UtcNow.AddDays(${expired ? -1 : 1}))
+  $basic = $cert.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.19' }
+  if ($basic.CertificateAuthority -ne $${ca}) { throw 'Fixture BasicConstraints mismatch' }
+  [IO.File]::WriteAllBytes((Join-Path $dir 'localhost.pfx'), $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Pfx, 'localdev'))
+  [IO.File]::WriteAllBytes((Join-Path $dir 'localhost.crt'), $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+  [IO.File]::WriteAllText((Join-Path $dir 'cert.thumbprint'), $cert.Thumbprint)
+} finally { if ($cert) { $cert.Dispose() }; $rsa.Dispose() }
+`;
+  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { encoding: "utf8", timeout: 30000 });
+  return directory;
+}
+
+// Break caught: shared files enter the default package or arbitrary input-directory files leak.
+test("explicit shared certificate builds exactly twelve payloads with a private-key warning", { skip: process.platform !== "win32" }, async t => {
+  const buildInstaller = await builder();
+  const f = fixture(t);
+  const directory = sharedCertificate(f.root);
+  put(directory, "other-private.key");
+  put(directory, "install.log");
+  put(f.root, "installer/shared-localhost.pfx", "not an explicitly selected key");
+  put(f.root, "public/assets/shared-localhost.pfx");
+  const defaultBuild = buildInstaller(f);
+  assert.deepEqual(readdirSync(defaultBuild.stageDir).sort(), [...payload].sort());
+  assert.ok(!f.logs.some(line => /WARNING.*shared private key/i.test(line)));
+
+  const result = buildInstaller({ ...f, sharedCertDir: "explicit shared inputs", output: "results/shared.exe" });
+  const expected = [...payload, ...sharedPayload];
+  assert.deepEqual(readdirSync(result.stageDir).sort(), [...expected].sort());
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(result.output, "utf8"))), expected);
+  const sed = readFileSync(result.sedPath, "utf8");
+  assert.deepEqual(sedFiles(sed), expected);
+  assert.deepEqual([...sed.matchAll(/^%FILE(\d+)%=\r?$/gm)].map(match => Number(match[1])), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  for (const [source, target] of [["localhost.pfx", "shared-localhost.pfx"], ["localhost.crt", "shared-localhost.crt"], ["cert.thumbprint", "shared-cert.thumbprint"]]) {
+    assert.deepEqual(readFileSync(join(result.stageDir, target)), readFileSync(join(directory, source)));
+  }
+  assert.ok(f.logs.some(line => /WARNING.*shared private key.*extract/i.test(line)));
+  const thumbprint = readFileSync(join(directory, "cert.thumbprint"), "utf8");
+  assert.ok(f.logs.some(line => line.includes(thumbprint)));
+  assert.ok(!f.logs.join("\n").includes(readFileSync(join(directory, "localhost.pfx")).toString("base64")));
+  const sea = JSON.parse(readFileSync(result.configPath, "utf8"));
+  assert.ok(!Object.keys(sea.assets).some(name => /pfx|crt|thumbprint|private/i.test(name)));
+  assert.equal(f.calls.length, 6, "certificate validation must not launch extra tools");
+});
+
+// Break caught: opting in silently ignores incomplete or non-file credential inputs.
+test("explicit shared inputs must be three nonempty regular files before staging or tools", async t => {
+  const buildInstaller = await builder();
+  for (const name of ["localhost.pfx", "localhost.crt", "cert.thumbprint"]) {
+    for (const kind of ["missing", "empty", "directory"]) {
+      const f = fixture(t);
+      const directory = join(f.root, "explicit shared inputs");
+      for (const file of ["localhost.pfx", "localhost.crt", "cert.thumbprint"]) put(directory, file);
+      const invalid = join(directory, name);
+      rmSync(invalid);
+      if (kind === "empty") writeFileSync(invalid, "");
+      if (kind === "directory") mkdirSync(invalid);
+      assert.throws(() => buildInstaller({ ...f, sharedCertDir: directory }), error => error.message.includes(name), `${kind} ${name}`);
+      assert.equal(f.calls.length, 0);
+      assert.ok(!existsSync(join(f.root, "installer/build")));
+    }
+  }
+  const f = fixture(t);
+  assert.throws(() => buildInstaller({ ...f, sharedCertDir: "missing-shared-dir" }), /shared.*(?:directory|missing)/i);
+  assert.equal(f.calls.length, 0);
+});
+
+// Break caught: malformed fingerprints or certificates reach IExpress without verification.
+test("shared build rejects malformed thumbprint and CRT before external tools", async t => {
+  const buildInstaller = await builder();
+  const f = fixture(t);
+  const directory = join(f.root, "explicit shared inputs");
+  put(directory, "localhost.pfx", "bad PFX");
+  put(directory, "localhost.crt", "bad CRT");
+  put(directory, "cert.thumbprint", "G".repeat(40));
+  assert.throws(() => buildInstaller({ ...f, sharedCertDir: directory }), /thumbprint.*40|40.*hex/i);
+  put(directory, "cert.thumbprint", "A".repeat(40));
+  assert.throws(() => buildInstaller({ ...f, sharedCertDir: directory }), /(?:CRT|X509|X\.509)/i);
+  assert.equal(f.calls.length, 0);
+  assert.ok(!existsSync(join(f.root, "installer/build")));
+});
+
+test("shared build rejects fingerprint mismatch and unparseable PFX", { skip: process.platform !== "win32" }, async t => {
+  const buildInstaller = await builder();
+  const f = fixture(t);
+  const directory = sharedCertificate(f.root);
+  const certificate = new X509Certificate(readFileSync(join(directory, "localhost.crt")));
+  put(directory, "cert.thumbprint", "A".repeat(40));
+  assert.throws(() => buildInstaller({ ...f, sharedCertDir: directory }), /thumbprint.*match|match.*thumbprint/i);
+  put(directory, "cert.thumbprint", certificate.fingerprint.replaceAll(":", "").toLowerCase() + "\r\n");
+  put(directory, "localhost.pfx", "bad PFX");
+  assert.throws(() => buildInstaller({ ...f, sharedCertDir: directory }), /PFX.*localdev|localdev.*PFX/i);
+  assert.equal(f.calls.length, 0);
+  assert.ok(!existsSync(join(f.root, "installer/build")));
+});
+
+for (const invalid of ["CA", "expired"]) {
+  test(`shared build rejects a ${invalid} certificate`, { skip: process.platform !== "win32" }, async t => {
+    const buildInstaller = await builder();
+    const f = fixture(t);
+    const directory = sharedCertificate(f.root, { ca: invalid === "CA", expired: invalid === "expired" });
+    assert.throws(() => buildInstaller({ ...f, sharedCertDir: directory }), invalid === "CA" ? /non-CA|CA=false/i : /validity|expired|valid/i);
+    assert.equal(f.calls.length, 0);
+    assert.ok(!existsSync(join(f.root, "installer/build")));
+  });
+}
+
+// Break caught: CN=localhost or a wrong SAN substitutes for an explicit localhost SAN.
+for (const san of [null, "wrong.example"]) {
+  test(`shared build rejects ${san === null ? "missing" : "wrong"} localhost SAN`, { skip: process.platform !== "win32" }, async t => {
+    const buildInstaller = await builder();
+    const f = fixture(t);
+    const directory = sharedCertificate(f.root, { san });
+    assert.throws(() => buildInstaller({ ...f, sharedCertDir: directory }), /localhost.*SAN|SAN.*localhost/i);
+    assert.equal(f.calls.length, 0);
+    assert.ok(!existsSync(join(f.root, "installer/build")));
+  });
+}
+
 // Break caught: --patch fabricates a pristine input or starts build before checking it.
 test("optional patch fails early with an actionable missing-pristine-backup error", async t => {
   const buildInstaller = await builder();
@@ -179,14 +324,16 @@ test("explicit patch runs once before creating the SEA blob", async t => {
   assert.ok(existsSync(result.output));
 });
 
-test("missing certificate helper is reported before any build tool or filesystem staging", async t => {
-  const buildInstaller = await builder();
-  const f = fixture(t);
-  rmSync(join(f.root, "installer/certificate.ps1"));
-  assert.throws(() => buildInstaller(f), /certificate\.ps1/i);
-  assert.equal(f.calls.length, 0);
-  assert.ok(!existsSync(join(f.root, "installer/build")));
-});
+for (const name of ["certificate.ps1", "startup.ps1", "options.ps1"]) {
+  test(`missing ${name} is reported before any build tool or filesystem staging`, async t => {
+    const buildInstaller = await builder();
+    const f = fixture(t);
+    rmSync(join(f.root, "installer", name));
+    assert.throws(() => buildInstaller(f), error => error.message.includes(name));
+    assert.equal(f.calls.length, 0);
+    assert.ok(!existsSync(join(f.root, "installer/build")));
+  });
+}
 
 test("missing local postject never falls back to a network installer", async t => {
   const buildInstaller = await builder();
@@ -229,11 +376,20 @@ test("build CLI help and invalid arguments run from a foreign cwd without produc
   const help = spawnSync(process.execPath, [entry, "--help"], { cwd: tmpdir(), encoding: "utf8" });
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /--postject-path/);
+  assert.match(help.stdout, /--shared-cert-dir/);
+  assert.match(help.stdout, /private key.*extract/i);
   assert.match(help.stdout, /overwritten/i);
   const invalid = spawnSync(process.execPath, [entry, "--output"], { cwd: tmpdir(), encoding: "utf8" });
   assert.equal(invalid.status, 1);
   assert.match(invalid.stderr, /--output requires a path/);
+  const missingSharedPath = spawnSync(process.execPath, [entry, "--shared-cert-dir"], { cwd: tmpdir(), encoding: "utf8" });
+  assert.equal(missingSharedPath.status, 1);
+  assert.match(missingSharedPath.stderr, /--shared-cert-dir requires a path/);
   if (process.platform === "win32") {
+    const missingSharedDir = spawnSync(process.execPath, [entry, "--shared-cert-dir", "explicit-missing"], { cwd: tmpdir(), encoding: "utf8" });
+    assert.equal(missingSharedDir.status, 1);
+    assert.match(missingSharedDir.stderr, /shared.*(?:directory|missing)/i);
+    assert.ok(missingSharedDir.stderr.includes(join(root, "explicit-missing")), "CLI resolves shared input relative to the project, not cwd");
     const batch = spawnSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `""${join(root, "installer/build.cmd")}" --help"`], { cwd: tmpdir(), encoding: "utf8", windowsVerbatimArguments: true });
     assert.equal(batch.status, 0, batch.stderr);
     assert.match(batch.stdout, /--postject-path/);
@@ -250,6 +406,23 @@ test("tampered SED with a wildcard source is rejected before external tools", as
   appendFileSync(join(f.root, "installer/app.sed"), "\n*=\n");
   assert.throws(() => buildInstaller(f), /SED|app\.sed|payload/i);
   assert.equal(f.calls.length, 0);
+});
+
+// Break caught: duplicate or renumbered declarations bypass the exact payload allowlist.
+test("tampered SED declarations cannot add or remap shared files without opt-in", async t => {
+  const buildInstaller = await builder();
+  for (const tamper of [
+    text => text.replace('FILE8="options.ps1"', 'FILE7="options.ps1"'),
+    text => text.replace("[SourceFiles]", 'FILE9="shared-localhost.pfx"\n[SourceFiles]'),
+    text => text.replace("[SourceFiles]", "FILE9=shared-localhost.pfx\n[SourceFiles]"),
+    text => text.replace("FILE0=", "%FILE9%=\nFILE0="),
+  ]) {
+    const f = fixture(t);
+    const path = join(f.root, "installer/app.sed");
+    writeFileSync(path, tamper(readFileSync(path, "utf8")));
+    assert.throws(() => buildInstaller(f), /SED|app\.sed|payload/i);
+    assert.equal(f.calls.length, 0);
+  }
 });
 
 test("rendered manifest has exactly one UTF-8 BOM and preserves Chinese text", async t => {

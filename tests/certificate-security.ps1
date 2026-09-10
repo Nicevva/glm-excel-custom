@@ -95,7 +95,8 @@ try {
     Assert ($null -eq (Get-OwnedCertificateThumbprint -CertificateDirectory $proof -WarningAction SilentlyContinue)) 'Invalid ownership evidence must not authorize removal'
     # CertificateRequest generates test-only, ephemeral RSA keys, never a store entry.
     $fingerprints = @()
-    foreach ($ca in @($false, $true, $false)) {
+    foreach ($variant in @('valid', 'ca', 'valid', 'wrong-san', 'no-san')) {
+        $ca = $variant -eq 'ca'
         $rsa = [Security.Cryptography.RSA]::Create(2048)
         $cert = $null
         try {
@@ -106,8 +107,8 @@ try {
             $oids = [Security.Cryptography.OidCollection]::new(); $oids.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1')) | Out-Null
             $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($oids, $false))
             $san = [Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
-            $san.AddDnsName('localhost'); $san.AddIpAddress([Net.IPAddress]::Loopback); $san.AddIpAddress([Net.IPAddress]::IPv6Loopback)
-            $request.CertificateExtensions.Add($san.Build())
+            $san.AddDnsName($(if ($variant -eq 'wrong-san') { 'example.com' } else { 'localhost' })); $san.AddIpAddress([Net.IPAddress]::Loopback); $san.AddIpAddress([Net.IPAddress]::IPv6Loopback)
+            if ($variant -ne 'no-san') { $request.CertificateExtensions.Add($san.Build()) }
             $cert = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-1), [DateTimeOffset]::UtcNow.AddDays(1))
             $dir = Join-Path $Temp ('real-' + [guid]::NewGuid().ToString('N'))
             New-PrivateDirectory -Path $dir
@@ -115,13 +116,34 @@ try {
             [IO.File]::WriteAllBytes((Join-Path $dir 'localhost.crt'), $cert.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
             [IO.File]::WriteAllText((Join-Path $dir 'cert.thumbprint'), $cert.Thumbprint)
             Assert ((& $realThumb -CertificateDirectory $dir) -eq $cert.Thumbprint) 'Ownership must compare real DER fingerprint'
-            if ($ca) {
+            if ($variant -ne 'valid') {
                 $failed = $false
                 try { & $validateFiles -CertificateDirectory $dir -ExpectedThumbprint $cert.Thumbprint } catch { $failed = $true }
-                Assert $failed 'Actual certificate validation must reject a CA certificate'
+                Assert $failed ('Actual certificate validation must reject ' + $variant)
             } else {
                 Assert (& $validateFiles -CertificateDirectory $dir -ExpectedThumbprint $cert.Thumbprint) 'Valid independent non-CA certificate must validate'
                 $fingerprints += $cert.Thumbprint
+                Assert ((Get-AIExcelOwnedTrustThumbprint -CertificateDirectory $dir) -eq $cert.Thumbprint) 'Legacy installation ownership remains recognized'
+                Set-AIExcelTrustOwnership -CertificateDirectory $dir -Thumbprint $cert.Thumbprint -Owned $false
+                Assert ($null -eq (Get-AIExcelOwnedTrustThumbprint -CertificateDirectory $dir)) 'Pre-existing shared trust is not owned by this install'
+                Set-AIExcelTrustOwnership -CertificateDirectory $dir -Thumbprint $cert.Thumbprint -Owned $true
+                Assert ((Get-AIExcelOwnedTrustThumbprint -CertificateDirectory $dir) -eq $cert.Thumbprint) 'Explicit owned trust may be cleaned on uninstall'
+                $source = Join-Path $Temp ('shared-source-' + [guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Path $source | Out-Null
+                Copy-Item (Join-Path $dir 'localhost.pfx') (Join-Path $source 'shared-localhost.pfx')
+                Copy-Item (Join-Path $dir 'localhost.crt') (Join-Path $source 'shared-localhost.crt')
+                Copy-Item (Join-Path $dir 'cert.thumbprint') (Join-Path $source 'shared-cert.thumbprint')
+                $destination = Join-Path $Temp ('shared-installed-' + [guid]::NewGuid().ToString('N'))
+                $copied = Copy-SharedLocalhostCertificate -SourceDirectory $source -OutputDirectory $destination
+                Assert ($copied.Thumbprint -eq $cert.Thumbprint) 'Shared mode must use only the explicit packaged fingerprint'
+                Assert (& $validateFiles -CertificateDirectory $destination -ExpectedThumbprint $cert.Thumbprint) 'Installed shared PFX/CRT must really match'
+                $acl = Get-Acl -LiteralPath $destination
+                Assert $acl.AreAccessRulesProtected 'Shared private output still needs restricted ACL'
+                [IO.File]::WriteAllText((Join-Path $source 'shared-cert.thumbprint'), ('E' * 40))
+                $badOutput = Join-Path $Temp ('bad-shared-' + [guid]::NewGuid().ToString('N'))
+                $failed = $false
+                try { Copy-SharedLocalhostCertificate -SourceDirectory $source -OutputDirectory $badOutput } catch { $failed = $true }
+                Assert ($failed -and -not (Test-Path -LiteralPath $badOutput)) 'Reject mismatched shared fingerprint and clean only new output'
             }
             [IO.File]::WriteAllText((Join-Path $dir 'cert.thumbprint'), ('C' * 40))
             Assert ($null -eq (& $realThumb -CertificateDirectory $dir -WarningAction SilentlyContinue)) 'Mismatched real CRT must not authorize trust cleanup'

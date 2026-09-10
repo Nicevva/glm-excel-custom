@@ -46,8 +46,10 @@ function Uninstall-AIExcelPackageCore {
     if ((Test-Path -LiteralPath $InstallDirectory) -and ((Get-Item -LiteralPath $InstallDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw 'Refusing to uninstall through a reparse point.'
     }
-    $thumb = Get-OwnedCertificateThumbprint -CertificateDirectory (Join-Path $InstallDirectory 'certs') -RequireValidEvidence
+    $thumb = Get-AIExcelOwnedTrustThumbprint -CertificateDirectory (Join-Path $InstallDirectory 'certs')
     $targets = @($thumb, '3A61AA2E3A5C7814A23CC9DE41442046F7C99CEC') | Where-Object { $_ } | Select-Object -Unique
+    # Stop future login launches before removing files; never remove unrelated Run values.
+    Remove-AIExcelAutoStart -InstallDirectory $InstallDirectory
     # If cleanup is denied, keep the files and ownership evidence for a retry.
     Remove-OwnedRootCertificates -Thumbprints $targets
     Stop-AIExcelUninstallInstance -InstallDirectory $InstallDirectory
@@ -60,6 +62,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     Add-Type -AssemblyName System.Windows.Forms | Out-Null
     try {
         . (Join-Path $PSScriptRoot 'certificate.ps1')
+        . (Join-Path $PSScriptRoot 'startup.ps1')
         Uninstall-AIExcelPackage -InstallDirectory (Join-Path $env:LOCALAPPDATA 'AIExcelCustom')
         [System.Windows.Forms.MessageBox]::Show('AI in Excel 已卸载。', 'AI in Excel') | Out-Null
     } catch {

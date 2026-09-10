@@ -11,6 +11,12 @@ Assert ($null -ne (Get-Command Install-AIExcelPackage -ErrorAction SilentlyConti
 function Enter-AIExcelInstallLock { return 'test-lock' }
 function Exit-AIExcelInstallLock { param($Lock) Assert ($Lock -eq 'test-lock') 'Release install lock' }
 $script:Imported = @(); $script:Removed = @(); $script:FailRegistration = $false; $script:FailTrust = $false
+. ([ScriptBlock]::Create([IO.File]::ReadAllText((Join-Path (Split-Path $InstallerPath) 'options.ps1'))))
+$script:AutoStart = $false; $script:AutoFail = $false; $script:ExistingSharedTrust = $false
+function Get-AIExcelAutoStartState { return @{ Exists=$true; Value=$script:AutoStart; Kind='String' } }
+function Set-AIExcelAutoStart { param($InstallDirectory, [bool]$Enabled) $script:AutoStart=$Enabled; if ($script:AutoFail) { throw 'startup write failed' } }
+function Restore-AIExcelAutoStartState { param($Previous) $script:AutoStart=$Previous.Value }
+function Test-AIExcelRootTrusted { param($Thumbprint) return $script:ExistingSharedTrust }
 function New-PrivateDirectory { param($Path) New-Item -ItemType Directory -Path $Path -ErrorAction Stop | Out-Null }
 function New-LocalhostCertificate {
     param($OutputDirectory)
@@ -20,7 +26,17 @@ function New-LocalhostCertificate {
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'cert.thumbprint'), ('B' * 40))
     [pscustomobject]@{ Thumbprint = ('B' * 40); CertificatePath = (Join-Path $OutputDirectory 'localhost.crt'); PfxPath = (Join-Path $OutputDirectory 'localhost.pfx') }
 }
+function Copy-SharedLocalhostCertificate {
+    param($SourceDirectory, $OutputDirectory)
+    $value = New-LocalhostCertificate -OutputDirectory $OutputDirectory
+    [IO.File]::WriteAllText($value.PfxPath, 'shared-explicit-key')
+    $script:SharedCopies++
+    return $value
+}
 function Get-OwnedCertificateThumbprint { param($CertificateDirectory) if (Test-Path (Join-Path $CertificateDirectory 'cert.thumbprint')) { return [IO.File]::ReadAllText((Join-Path $CertificateDirectory 'cert.thumbprint')).Trim() }; return $null }
+$script:OldTrustOwned = $true; $script:LastRecordedOwnership = $null
+function Get-AIExcelOwnedTrustThumbprint { param($CertificateDirectory) if ($script:OldTrustOwned) { return Get-OwnedCertificateThumbprint -CertificateDirectory $CertificateDirectory }; return $null }
+function Set-AIExcelTrustOwnership { param($CertificateDirectory, $Thumbprint, [bool]$Owned) $script:LastRecordedOwnership=$Owned }
 function Import-Certificate { param($FilePath, $CertStoreLocation, $ErrorAction) Assert ($CertStoreLocation -eq 'Cert:\CurrentUser\Root') 'Only current-user public trust allowed'; $script:Imported += 'B' * 40; if ($script:FailTrust) { throw 'trust refused' }; [pscustomobject]@{ Thumbprint = ('B' * 40) } }
 function Remove-OwnedRootCertificates { param($Thumbprints) $script:Removed += $Thumbprints }
 function Stop-AIExcelInstance { param($InstallDirectory) }
@@ -34,7 +50,7 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) ('aie-install-test-' + [guid]::NewG
 New-Item -ItemType Directory -Path $temp | Out-Null
 function Get-AIExcelShortcutPaths { return @((Join-Path $temp 'desktop.lnk'), (Join-Path $temp 'uninstall.lnk')) }
 $source = Join-Path $temp 'source'; New-Item -ItemType Directory -Path $source | Out-Null
-foreach ($name in @('AIExcelCustom.exe', 'launch.vbs', 'uninstall.ps1', 'app.ico', 'certificate.ps1')) { [IO.File]::WriteAllText((Join-Path $source $name), 'new ' + $name) }
+foreach ($name in @('AIExcelCustom.exe', 'launch.vbs', 'uninstall.ps1', 'app.ico', 'certificate.ps1', 'startup.ps1', 'options.ps1')) { [IO.File]::WriteAllText((Join-Path $source $name), 'new ' + $name) }
 [IO.File]::WriteAllText((Join-Path $source 'manifest.template.xml'), '<OfficeApp><Url>https://localhost:__PORT__/taskpane.html</Url></OfficeApp>')
 # A stale packaged private key must never be installed, even if source is polluted.
 [IO.File]::WriteAllText((Join-Path $source 'localhost.pfx'), 'SHARED-DO-NOT-INSTALL')
@@ -53,6 +69,30 @@ try {
     Assert ($script:Removed -contains ('A' * 40)) 'Remove verified old certificate after commit'
     Assert ($script:Removed -contains '3A61AA2E3A5C7814A23CC9DE41442046F7C99CEC') 'Rotate the known old shared certificate'
     Assert ($script:Removed -notcontains ('B' * 40)) 'Never remove the newly committed certificate'
+    $script:SharedCopies = 0
+    foreach ($name in @('shared-localhost.pfx','shared-localhost.crt','shared-cert.thumbprint')) { [IO.File]::WriteAllText((Join-Path $source $name), 'explicit-shared-fixture') }
+    $sharedDir = Join-Path $temp 'shared'; Seed-Old $sharedDir
+    $failed = $false
+    try { Install-AIExcelPackage -SourceDirectory $source -InstallDirectory $sharedDir -CertificateMode shared } catch { $failed = $true }
+    Assert ($failed -and $script:SharedCopies -eq 0) 'Shared mode cannot skip explicit consent via backend invocation'
+    $result = Install-AIExcelPackage -SourceDirectory $source -InstallDirectory $sharedDir -CertificateMode shared -AcceptSharedRisk $true -AutoStart $true
+    Assert ($script:SharedCopies -eq 1 -and $script:AutoStart) 'Explicit shared choice and login startup must be committed'
+    $saved = [IO.File]::ReadAllText((Join-Path $sharedDir 'install-options.json')) | ConvertFrom-Json
+    Assert ($saved.CertificateMode -eq 'shared' -and $saved.AutoStart -and -not $saved.PSObject.Properties['AcceptSharedRisk']) 'Save mode and startup preference but never shared-risk acceptance'
+    $script:ExistingSharedTrust = $true; $script:OldTrustOwned = $false
+    $externalDir = Join-Path $temp 'pretrusted-shared'
+    Install-AIExcelPackage -SourceDirectory $source -InstallDirectory $externalDir -CertificateMode shared -AcceptSharedRisk $true -AutoStart $false | Out-Null
+    Assert ($script:LastRecordedOwnership -eq $false) 'Pre-existing external shared trust must not become installation-owned'
+    $script:Removed = @()
+    Install-AIExcelPackage -SourceDirectory $source -InstallDirectory $externalDir -AutoStart $false | Out-Null
+    Assert ($script:Removed -notcontains ('B' * 40)) 'Switching to independent mode must preserve prior externally-owned trust'
+    $script:OldTrustOwned = $true
+    $script:AutoFail = $true; $script:AutoStart = $true; $script:ExistingSharedTrust = $true; $script:Removed = @()
+    $failed = $false
+    try { Install-AIExcelPackage -SourceDirectory $source -InstallDirectory $sharedDir -CertificateMode shared -AcceptSharedRisk $true -AutoStart $false } catch { $failed = $true }
+    Assert ($failed -and $script:AutoStart) 'Startup failure must restore the previous startup choice'
+    Assert ($script:Removed -notcontains ('B' * 40)) 'Shared upgrade rollback must not revoke already-existing trusted certificate'
+    $script:AutoFail = $false; $script:ExistingSharedTrust = $false
     foreach ($case in @('registration', 'trust')) {
         $dir = Join-Path $temp $case; Seed-Old $dir
         $script:Imported = @(); $script:Removed = @(); $script:RegistrationRestored = $false

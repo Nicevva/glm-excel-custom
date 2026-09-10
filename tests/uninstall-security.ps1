@@ -11,16 +11,19 @@ New-Item -ItemType Directory -Path $temp | Out-Null
 function Enter-AIExcelInstallLock { return 'test-lock' }
 function Exit-AIExcelInstallLock {param($Lock) Assert ($Lock -eq 'test-lock') 'Release uninstall lock'}
 $script:thumb=$null; $script:removed=@(); $script:fail=$false
-function Get-OwnedCertificateThumbprint {param($CertificateDirectory) return $script:thumb}
+function Get-AIExcelOwnedTrustThumbprint {param($CertificateDirectory) return $script:thumb}
 function Remove-OwnedRootCertificates {param($Thumbprints) $script:removed=@($Thumbprints); if ($script:fail) {throw 'injected trust cleanup failure'} }
 function Remove-AIExcelRegistration {param($InstallDirectory)}
 function Remove-AIExcelShortcuts {param($InstallDirectory)}
 function Stop-AIExcelUninstallInstance {param($InstallDirectory)}
+$script:StartupRemoved=$false
+function Remove-AIExcelAutoStart {param($InstallDirectory) $script:StartupRemoved=$true}
 try {
     $dir=Join-Path $temp 'one';New-Item -ItemType Directory -Path $dir | Out-Null
     Uninstall-AIExcelPackage -InstallDirectory $dir
     Assert ($script:removed.Count -eq 1 -and $script:removed[0] -eq '3A61AA2E3A5C7814A23CC9DE41442046F7C99CEC') 'No ownership evidence permits only known shared fingerprint, never a CN scan'
     Assert (-not (Test-Path -LiteralPath $dir)) 'Remove installation on success'
+    Assert $script:StartupRemoved 'Uninstall must remove only the application login startup entry'
     $script:thumb='A'*40; $script:fail=$true
     $dir=Join-Path $temp 'two';New-Item -ItemType Directory -Path $dir | Out-Null
     [IO.File]::WriteAllText((Join-Path $dir 'recovery'), 'keep')
