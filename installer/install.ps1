@@ -1,112 +1,225 @@
-﻿# AI in Excel (Custom) - per-user installer (no admin / no UAC).
-# MUST be saved as UTF-8 with BOM for Chinese strings to render in PS 5.1.
-$ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Windows.Forms | Out-Null
+﻿# AI in Excel - per-user installation with locally generated HTTPS keys.
+$ErrorActionPreference = 'Stop'
 
-$AppName    = "AIExcelCustom"
-$InstallDir = Join-Path $env:LOCALAPPDATA $AppName
-$Src        = $PSScriptRoot   # IExpress extracts everything flat here
-$Log        = Join-Path $env:TEMP "AIExcelCustom-install.log"
-
-function Show-Msg($text, $title = "AI in Excel 安装") {
-  [System.Windows.Forms.MessageBox]::Show($text, $title) | Out-Null
-}
 function Log($text) {
-  ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $text) | Out-File -FilePath $Log -Append -Encoding UTF8
+    ('[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $text) | Out-File -FilePath $script:LogPath -Append -Encoding UTF8
 }
 
-try {
-  "===== AI in Excel install $(Get-Date) =====" | Out-File -FilePath $Log -Encoding UTF8
-  Log ("Src=" + $Src)
-  Log ("InstallDir=" + $InstallDir)
+function Stop-AIExcelInstance($InstallDirectory) {
+    $exe = Join-Path $InstallDirectory 'AIExcelCustom.exe'
+    Get-CimInstance Win32_Process -Filter "Name='AIExcelCustom.exe'" -ErrorAction Stop |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath -eq $exe } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop }
+    Start-Sleep -Milliseconds 500
+}
 
-  # (1) environment check: Excel present?
-  $hasExcel = $false
-  try { if ([Type]::GetTypeFromProgID("Excel.Application")) { $hasExcel = $true } } catch {}
-  if (-not $hasExcel) {
-    $root = Get-ChildItem "HKCU:\Software\Microsoft\Office" -EA SilentlyContinue |
-            Where-Object { Test-Path "$($_.PSPath)\Excel" }
-    if ($root) { $hasExcel = $true }
-  }
-  Log ("hasExcel=" + $hasExcel)
-  if (-not $hasExcel) { Show-Msg "未检测到 Microsoft Excel。请先安装 Office 桌面版后再运行本安装程序。"; exit 1 }
+function Get-AIExcelPort($InstallDirectory) {
+    $exe = Join-Path $InstallDirectory 'AIExcelCustom.exe'
+    $ours = @(Get-CimInstance Win32_Process -Filter "Name='AIExcelCustom.exe'" -ErrorAction Stop |
+        Where-Object { $_.ExecutablePath -eq $exe })
+    $oldPort = 0
+    $portFile = Join-Path $InstallDirectory 'port.txt'
+    if (Test-Path -LiteralPath $portFile) { [int]::TryParse([IO.File]::ReadAllText($portFile).Trim(), [ref]$oldPort) | Out-Null }
+    $ports = @()
+    if ($oldPort -ge 3000 -and $oldPort -le 3099) { $ports += $oldPort }
+    $ports += 3000..3099
+    foreach ($port in ($ports | Select-Object -Unique)) {
+        if ($port -eq $oldPort -and $ours.Count) {
+            $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+            if ($listeners.Count -gt 0 -and @($listeners | Where-Object { $_.OwningProcess -notin $ours.ProcessId }).Count -eq 0) { return $port }
+        }
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
+        try { $listener.Start(); return $port } catch { } finally { $listener.Stop() }
+    }
+    throw 'Ports 3000-3099 are unavailable. Close the conflicting program and retry.'
+}
 
-  # (2) pick a free port 3000..3099
-  function Test-Port($p) {
+function Get-AIExcelRegistration($InstallDirectory) {
+    $path = 'HKCU:\Software\Microsoft\Office\16.0\WEF\Developer'
+    $name = Join-Path $InstallDirectory 'manifest.xml'
+    $item = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
+    $property = if ($null -ne $item) { $item.PSObject.Properties[$name] } else { $null }
+    return @{ Exists = ($null -ne $property); Value = $(if ($property) { $property.Value } else { $null }) }
+}
+
+function Set-AIExcelRegistration($InstallDirectory) {
+    $path = 'HKCU:\Software\Microsoft\Office\16.0\WEF\Developer'
+    $name = Join-Path $InstallDirectory 'manifest.xml'
+    New-Item -Path $path -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -LiteralPath $path -Name $name -Value $name -PropertyType String -Force -ErrorAction Stop | Out-Null
+}
+
+function Restore-AIExcelRegistration($InstallDirectory, $Previous) {
+    $path = 'HKCU:\Software\Microsoft\Office\16.0\WEF\Developer'
+    $name = Join-Path $InstallDirectory 'manifest.xml'
+    if ($Previous.Exists) {
+        New-ItemProperty -LiteralPath $path -Name $name -Value $Previous.Value -PropertyType String -Force -ErrorAction Stop | Out-Null
+    } elseif (Test-Path -LiteralPath $path) {
+        Remove-ItemProperty -LiteralPath $path -Name $name -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-AIExcelShortcutPaths {
+    return @((Join-Path ([Environment]::GetFolderPath('Desktop')) '启动 AI in Excel.lnk'),
+        (Join-Path ([Environment]::GetFolderPath('Programs')) 'AI in Excel\卸载 AI in Excel.lnk'))
+}
+
+function Save-AIExcelShortcuts($InstallDirectory) {
+    $paths = @(Get-AIExcelShortcutPaths)
+    $shell = New-Object -ComObject WScript.Shell
+    New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($paths[1])) -Force | Out-Null
+    $launch = $shell.CreateShortcut($paths[0])
+    $launch.TargetPath = "$env:WINDIR\System32\wscript.exe"
+    $launch.Arguments = '"' + (Join-Path $InstallDirectory 'launch.vbs') + '"'
+    $launch.WorkingDirectory = $InstallDirectory
+    $launch.IconLocation = (Join-Path $InstallDirectory 'app.ico') + ',0'
+    $launch.Description = '启动 AI in Excel (Custom)'
+    $launch.Save()
+    $uninstall = $shell.CreateShortcut($paths[1])
+    $uninstall.TargetPath = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $uninstall.Arguments = '-ExecutionPolicy Bypass -File "' + (Join-Path $InstallDirectory 'uninstall.ps1') + '"'
+    $uninstall.WorkingDirectory = $InstallDirectory
+    $uninstall.IconLocation = $launch.IconLocation
+    $uninstall.Save()
+}
+
+function Install-AIExcelPackage {
+    [CmdletBinding()]
+    param([string]$SourceDirectory, [string]$InstallDirectory)
+    $lock = Enter-AIExcelInstallLock
+    try { return Install-AIExcelPackageCore -SourceDirectory $SourceDirectory -InstallDirectory $InstallDirectory }
+    finally { Exit-AIExcelInstallLock $lock }
+}
+
+function Install-AIExcelPackageCore {
+    [CmdletBinding()]
+    param([string]$SourceDirectory, [string]$InstallDirectory)
+    $files = @('AIExcelCustom.exe', 'launch.vbs', 'uninstall.ps1', 'manifest.template.xml', 'app.ico', 'certificate.ps1')
+    foreach ($name in $files) {
+        if (-not (Test-Path -LiteralPath (Join-Path $SourceDirectory $name) -PathType Leaf)) { throw "Missing installation input: $name" }
+    }
+    if ((Test-Path -LiteralPath $InstallDirectory) -and ((Get-Item -LiteralPath $InstallDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Refusing to replace an installation directory that is a reparse point.'
+    }
+    $oldThumb = Get-OwnedCertificateThumbprint -CertificateDirectory (Join-Path $InstallDirectory 'certs') -RequireValidEvidence
+    $previousRegistration = Get-AIExcelRegistration -InstallDirectory $InstallDirectory
+    $shortcuts = @{}
+    foreach ($path in @(Get-AIExcelShortcutPaths)) {
+        $shortcuts[$path] = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllBytes($path) } else { $null }
+    }
+    $port = Get-AIExcelPort -InstallDirectory $InstallDirectory
+    $stage = Join-Path ([IO.Path]::GetDirectoryName($InstallDirectory)) ('.AIExcelCustom-install-' + [guid]::NewGuid().ToString('N'))
+    $fresh = Join-Path $stage 'app'
+    $backup = Join-Path $stage 'previous'
+    $newCert = $null
+    $trustAttempted = $false
+    $oldMoved = $false
+    $newMoved = $false
+    $registrationAttempted = $false
+    $shortcutsAttempted = $false
+    $preserveStage = $false
+    New-PrivateDirectory -Path $stage
     try {
-      $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $p)
-      $l.Start(); $l.Stop(); return $true
-    } catch { return $false }
-  }
-  $port = 0
-  foreach ($p in 3000..3099) { if (Test-Port $p) { $port = $p; break } }
-  Log ("port=" + $port)
-  if ($port -eq 0) { Show-Msg "端口 3000-3099 全部被占用，请关闭占用程序后重试。"; exit 1 }
-
-  # (3) copy files
-  Log "copying files..."
-  # stop any running instance so we can overwrite the exe (upgrade / re-install)
-  Get-Process -Name "AIExcelCustom" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-  Start-Sleep -Milliseconds 700
-  Log "stopped running instances (if any)"
-  New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-  New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "certs") | Out-Null
-  Copy-Item (Join-Path $Src "AIExcelCustom.exe")          $InstallDir -Force
-  Copy-Item (Join-Path $Src "launch.vbs")             $InstallDir -Force
-  Copy-Item (Join-Path $Src "uninstall.ps1")          $InstallDir -Force
-  Copy-Item (Join-Path $Src "manifest.template.xml")  $InstallDir -Force
-  Copy-Item (Join-Path $Src "app.ico")            $InstallDir -Force
-  Copy-Item (Join-Path $Src "localhost.pfx")          (Join-Path $InstallDir "certs") -Force
-  Copy-Item (Join-Path $Src "localhost.crt")          (Join-Path $InstallDir "certs") -Force
-  Copy-Item (Join-Path $Src "cert.thumbprint")        (Join-Path $InstallDir "certs") -Force
-  Log "files copied"
-
-  # (4) render manifest with chosen port + persist port
-  (Get-Content (Join-Path $InstallDir "manifest.template.xml") -Raw) -replace "__PORT__", "$port" |
-    Set-Content (Join-Path $InstallDir "manifest.xml") -Encoding UTF8
-  Set-Content (Join-Path $InstallDir "port.txt") "$port" -Encoding Ascii -NoNewline
-  Log "manifest rendered"
-
-  # (5) install cert into current-user Trusted Root (no admin)
-  Import-Certificate -FilePath (Join-Path $InstallDir "certs\localhost.crt") `
-    -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-  Log "cert imported into CurrentUser\Root"
-
-  # (6) register sideload (HKCU WEF Developer)
-  $manifestPath = Join-Path $InstallDir "manifest.xml"
-  $dev = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
-  New-Item -Path $dev -Force | Out-Null
-  New-ItemProperty -Path $dev -Name $manifestPath -Value $manifestPath -PropertyType String -Force | Out-Null
-  Log "sideload registered"
-
-  # (7) desktop shortcut
-  $ws = New-Object -ComObject WScript.Shell
-  $desktop = [Environment]::GetFolderPath("Desktop")
-  $lnk = $ws.CreateShortcut((Join-Path $desktop "启动 AI in Excel.lnk"))
-  $lnk.TargetPath       = "$env:WINDIR\System32\wscript.exe"
-  $lnk.Arguments        = "`"$InstallDir\launch.vbs`""
-  $lnk.WorkingDirectory = $InstallDir
-  $lnk.IconLocation     = "$InstallDir\app.ico,0"
-  $lnk.Description       = "启动 AI in Excel (Custom)"
-  $lnk.Save()
-
-  # start-menu uninstall shortcut
-  $startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "AI in Excel"
-  New-Item -ItemType Directory -Force -Path $startMenu | Out-Null
-  $ulnk = $ws.CreateShortcut((Join-Path $startMenu "卸载 AI in Excel.lnk"))
-  $ulnk.TargetPath       = "powershell.exe"
-  $ulnk.Arguments        = "-ExecutionPolicy Bypass -File `"$InstallDir\uninstall.ps1`""
-  $ulnk.WorkingDirectory = $InstallDir
-  $ulnk.IconLocation     = "$InstallDir\app.ico,0"
-  $ulnk.Save()
-  Log "shortcuts created"
-
-  Log "DONE OK"
-  Show-Msg "✅ 安装完成（端口 $port）！`n`n1) 双击桌面【启动 AI in Excel】`n2) 打开 Excel，在「开始」选项卡找到 AI in Excel`n`n如按钮未出现，请重启 Excel。"
+        New-PrivateDirectory -Path $fresh
+        foreach ($name in $files) { Copy-Item -LiteralPath (Join-Path $SourceDirectory $name) -Destination (Join-Path $fresh $name) -ErrorAction Stop }
+        $newCert = New-LocalhostCertificate -OutputDirectory (Join-Path $fresh 'certs')
+        # Public-only recovery proof survives removal of the newly installed files.
+        $proof = Join-Path $stage 'new-trust'
+        New-PrivateDirectory -Path $proof
+        Copy-Item -LiteralPath $newCert.CertificatePath -Destination (Join-Path $proof 'localhost.crt') -ErrorAction Stop
+        [IO.File]::WriteAllText((Join-Path $proof 'cert.thumbprint'), $newCert.Thumbprint, [Text.Encoding]::ASCII)
+        $template = [IO.File]::ReadAllText((Join-Path $fresh 'manifest.template.xml'))
+        if (-not $template.Contains('__PORT__')) { throw 'Invalid installation manifest template.' }
+        [IO.File]::WriteAllText((Join-Path $fresh 'manifest.xml'), $template.Replace('__PORT__', [string]$port), [Text.UTF8Encoding]::new($true))
+        [IO.File]::WriteAllText((Join-Path $fresh 'port.txt'), [string]$port, [Text.Encoding]::ASCII)
+        # Import only the newly generated public certificate; old trust remains until commit.
+        $trustAttempted = $true
+        $trusted = @(Import-Certificate -FilePath $newCert.CertificatePath -CertStoreLocation 'Cert:\CurrentUser\Root' -ErrorAction Stop)
+        if (@($trusted | Where-Object { $_.Thumbprint -eq $newCert.Thumbprint }).Count -ne 1) { throw 'New certificate trust was not confirmed.' }
+        Stop-AIExcelInstance -InstallDirectory $InstallDirectory
+        if (Test-Path -LiteralPath $InstallDirectory) {
+            Move-Item -LiteralPath $InstallDirectory -Destination $backup -ErrorAction Stop
+            $oldMoved = $true
+        }
+        Move-Item -LiteralPath $fresh -Destination $InstallDirectory -ErrorAction Stop
+        $newMoved = $true
+        $registrationAttempted = $true
+        Set-AIExcelRegistration -InstallDirectory $InstallDirectory
+        $shortcutsAttempted = $true
+        Save-AIExcelShortcuts -InstallDirectory $InstallDirectory
+    } catch {
+        $failure = $_
+        if ($failure.Exception.Data['CertificateRecoveryDirectory']) {
+            $preserveStage = $true
+            Write-Warning ('Private-key cleanup requires recovery; preserve ' + $failure.Exception.Data['CertificateRecoveryDirectory'])
+        }
+        $filesRestored = -not $newMoved
+        try {
+            if ($newMoved) {
+                Stop-AIExcelInstance -InstallDirectory $InstallDirectory
+                Remove-Item -LiteralPath $InstallDirectory -Recurse -Force -ErrorAction Stop
+                $filesRestored = $true
+            }
+            if ($oldMoved) { Move-Item -LiteralPath $backup -Destination $InstallDirectory -ErrorAction Stop }
+        } catch {
+            $preserveStage = $true
+            Write-Warning ("File rollback needs manual recovery; backup retained at {0}: {1}" -f $stage, $_.Exception.Message)
+        }
+        if ($registrationAttempted) {
+            try { Restore-AIExcelRegistration -InstallDirectory $InstallDirectory -Previous $previousRegistration }
+            catch { $preserveStage = $true; Write-Warning ('Registration rollback failed: ' + $_.Exception.Message) }
+        }
+        if ($shortcutsAttempted) {
+            foreach ($path in $shortcuts.Keys) {
+                try {
+                    if ($null -eq $shortcuts[$path]) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } }
+                    else { [IO.File]::WriteAllBytes($path, [byte[]]$shortcuts[$path]) }
+                } catch { $preserveStage = $true; Write-Warning ('Shortcut rollback failed: ' + $_.Exception.Message) }
+            }
+        }
+        if (-not $filesRestored -and $null -ne $newCert) {
+            Write-Warning ('New trust retained because its installation files could not be removed: ' + $newCert.Thumbprint)
+        }
+        if ($filesRestored -and $trustAttempted -and $null -ne $newCert) {
+            try { Remove-OwnedRootCertificates -Thumbprints @($newCert.Thumbprint) }
+            catch { $preserveStage = $true; Write-Warning ("Could not retract new certificate {0}: {1}" -f $newCert.Thumbprint, $_.Exception.Message) }
+        }
+        if (-not $preserveStage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop }
+        else {
+            $recoveryError = [InvalidOperationException]::new(($failure.Exception.Message + ' Recovery files retained at: ' + $stage), $failure.Exception)
+            throw $recoveryError
+        }
+        throw $failure
+    }
+    # These are the only historical certificates this installer is allowed to retire.
+    $obsolete = @($oldThumb, '3A61AA2E3A5C7814A23CC9DE41442046F7C99CEC') | Where-Object { $_ -and $_ -ne $newCert.Thumbprint }
+    $cleanupWarning = $null
+    try {
+        Remove-OwnedRootCertificates -Thumbprints $obsolete
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop
+    } catch {
+        $cleanupWarning = "旧证书清理未完成；请保留备份目录 $stage。指纹：$($obsolete -join ', ')。$($_.Exception.Message)"
+        Write-Warning $cleanupWarning
+    }
+    return [pscustomobject]@{ Port = $port; Thumbprint = $newCert.Thumbprint; CleanupWarning = $cleanupWarning }
 }
-catch {
-  $detail = ($_ | Out-String)
-  Log ("ERROR: " + $detail)
-  Show-Msg ("安装失败，已记录日志：`n" + $Log + "`n`n错误：" + $_.Exception.Message + "`n`n位置：" + $_.InvocationInfo.PositionMessage) "AI in Excel 安装出错"
-  exit 1
+
+# No certificate-store changes occur until the user runs the installer.
+if ($MyInvocation.InvocationName -ne '.') {
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    $script:LogPath = Join-Path $env:TEMP 'AIExcelCustom-install.log'
+    try {
+        '===== AI in Excel install =====' | Out-File -FilePath $script:LogPath -Encoding UTF8
+        if (-not [Type]::GetTypeFromProgID('Excel.Application')) { throw '未检测到 Microsoft Excel，请先安装 Office 桌面版。' }
+        . (Join-Path $PSScriptRoot 'certificate.ps1')
+        $result = Install-AIExcelPackage -SourceDirectory $PSScriptRoot -InstallDirectory (Join-Path $env:LOCALAPPDATA 'AIExcelCustom')
+        Log ('DONE OK; port=' + $result.Port)
+        $message = "安装完成（端口 $($result.Port)）。`n本机已生成独立的 HTTPS 证书。`n`n请双击桌面【启动 AI in Excel】，然后重新打开 Excel。"
+        if ($result.CleanupWarning) { $message += "`n`n注意：" + $result.CleanupWarning; Log $result.CleanupWarning }
+        [System.Windows.Forms.MessageBox]::Show($message, 'AI in Excel 安装') | Out-Null
+    } catch {
+        Log ($_ | Out-String)
+        [System.Windows.Forms.MessageBox]::Show("安装失败：$($_.Exception.Message)`n日志：$script:LogPath", 'AI in Excel 安装出错') | Out-Null
+        exit 1
+    }
 }

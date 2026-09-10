@@ -1,32 +1,69 @@
-﻿# AI in Excel - per-user uninstaller. UTF-8 with BOM.
-$ErrorActionPreference = "SilentlyContinue"
-Add-Type -AssemblyName System.Windows.Forms | Out-Null
+﻿# AI in Excel - per-user uninstaller, exact owned certificate cleanup only.
+$ErrorActionPreference = 'Stop'
 
-$InstallDir   = Join-Path $env:LOCALAPPDATA "AIExcelCustom"
-$manifestPath = Join-Path $InstallDir "manifest.xml"
-$thumbFile    = Join-Path $InstallDir "certs\cert.thumbprint"
-
-# (1) remove sideload registry value
-$dev = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
-Remove-ItemProperty -Path $dev -Name $manifestPath -EA SilentlyContinue
-
-# (2) remove our cert from current-user Trusted Root.
-# Prefer exact thumbprint match (recorded at build); fall back to CN=localhost self-signed.
-$thumb = $null
-if (Test-Path $thumbFile) { $thumb = (Get-Content $thumbFile -Raw).Trim() }
-if ($thumb) {
-  Remove-Item ("Cert:\CurrentUser\Root\" + $thumb) -Force -EA SilentlyContinue
-} else {
-  Get-ChildItem Cert:\CurrentUser\Root |
-    Where-Object { $_.Subject -eq "CN=localhost" -and $_.Issuer -eq "CN=localhost" } |
-    ForEach-Object { Remove-Item $_.PSPath -Force -EA SilentlyContinue }
+function Stop-AIExcelUninstallInstance($InstallDirectory) {
+    $exe = Join-Path $InstallDirectory 'AIExcelCustom.exe'
+    Get-CimInstance Win32_Process -Filter "Name='AIExcelCustom.exe'" -ErrorAction Stop |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath -eq $exe } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop }
+    Start-Sleep -Milliseconds 500
 }
 
-# (3) shortcuts
-Remove-Item (Join-Path ([Environment]::GetFolderPath("Desktop")) "启动 AI in Excel.lnk") -Force -EA SilentlyContinue
-Remove-Item (Join-Path ([Environment]::GetFolderPath("Programs")) "AI in Excel") -Recurse -Force -EA SilentlyContinue
+function Remove-AIExcelRegistration($InstallDirectory) {
+    $path = 'HKCU:\Software\Microsoft\Office\16.0\WEF\Developer'
+    if (Test-Path -LiteralPath $path) {
+        Remove-ItemProperty -LiteralPath $path -Name (Join-Path $InstallDirectory 'manifest.xml') -ErrorAction SilentlyContinue
+    }
+}
 
-# (4) files
-Remove-Item $InstallDir -Recurse -Force -EA SilentlyContinue
+function Remove-AIExcelShortcuts($InstallDirectory) {
+    $paths = @((Join-Path ([Environment]::GetFolderPath('Desktop')) '启动 AI in Excel.lnk'),
+        (Join-Path ([Environment]::GetFolderPath('Programs')) 'AI in Excel\卸载 AI in Excel.lnk'))
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($path in $paths) {
+        if (Test-Path -LiteralPath $path) {
+            $shortcut = $shell.CreateShortcut($path)
+            if ($shortcut.WorkingDirectory -eq $InstallDirectory) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+        }
+    }
+    $folder = [IO.Path]::GetDirectoryName($paths[1])
+    if ((Test-Path -LiteralPath $folder) -and @(Get-ChildItem -LiteralPath $folder -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $folder -ErrorAction Stop
+    }
+}
 
-[System.Windows.Forms.MessageBox]::Show("AI in Excel 已卸载。", "AI in Excel") | Out-Null
+function Uninstall-AIExcelPackage {
+    [CmdletBinding()]
+    param([string]$InstallDirectory)
+    $lock = Enter-AIExcelInstallLock
+    try { Uninstall-AIExcelPackageCore -InstallDirectory $InstallDirectory }
+    finally { Exit-AIExcelInstallLock $lock }
+}
+
+function Uninstall-AIExcelPackageCore {
+    [CmdletBinding()]
+    param([string]$InstallDirectory)
+    if ((Test-Path -LiteralPath $InstallDirectory) -and ((Get-Item -LiteralPath $InstallDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Refusing to uninstall through a reparse point.'
+    }
+    $thumb = Get-OwnedCertificateThumbprint -CertificateDirectory (Join-Path $InstallDirectory 'certs') -RequireValidEvidence
+    $targets = @($thumb, '3A61AA2E3A5C7814A23CC9DE41442046F7C99CEC') | Where-Object { $_ } | Select-Object -Unique
+    # If cleanup is denied, keep the files and ownership evidence for a retry.
+    Remove-OwnedRootCertificates -Thumbprints $targets
+    Stop-AIExcelUninstallInstance -InstallDirectory $InstallDirectory
+    Remove-AIExcelRegistration -InstallDirectory $InstallDirectory
+    Remove-AIExcelShortcuts -InstallDirectory $InstallDirectory
+    if (Test-Path -LiteralPath $InstallDirectory) { Remove-Item -LiteralPath $InstallDirectory -Recurse -Force -ErrorAction Stop }
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    try {
+        . (Join-Path $PSScriptRoot 'certificate.ps1')
+        Uninstall-AIExcelPackage -InstallDirectory (Join-Path $env:LOCALAPPDATA 'AIExcelCustom')
+        [System.Windows.Forms.MessageBox]::Show('AI in Excel 已卸载。', 'AI in Excel') | Out-Null
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("卸载未完成，已保留必要文件供重试。`n$($_.Exception.Message)", 'AI in Excel') | Out-Null
+        exit 1
+    }
+}

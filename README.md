@@ -54,18 +54,31 @@ that block browser cross-origin requests.
 
 **Prerequisites:** Node.js 22+, Windows with Microsoft Excel installed.
 
-```cmd
-:: 1. Generate a self-signed localhost cert (one-time)
-cd installer
-powershell -ExecutionPolicy Bypass -File gen-cert.ps1
-cd ..
+Run these steps from the project root. Certificate generation defaults to
+**project-root `certs/`**, not `installer/dist/certs/`, and does **not** grant root
+trust automatically. You can select another new directory with
+`gen-cert.ps1 -OutputDirectory <path>`, but the development server expects the
+root `certs/` location. Never reuse a certificate from an old package.
 
-:: 2. Register the sideload manifest
+```cmd
+:: 1. Generate this machine's localhost certificate (one-time).
+powershell -NoProfile -ExecutionPolicy Bypass -File installer\gen-cert.ps1
+
+:: 2. Review the public certificate and its fingerprint before trusting it.
+certutil -dump certs\localhost.crt
+:: Explicitly trust ONLY this public CRT in the current user's root store.
+powershell -NoProfile -Command "Import-Certificate -FilePath certs/localhost.crt -CertStoreLocation Cert:\CurrentUser\Root"
+
+:: 3. Register the sideload manifest.
 npx office-addin-dev-settings register manifest/manifest.xml
 
-:: 3. Start the local server (keep this window open while using the add-in)
+:: 4. Keep the server window open while using the add-in.
 start-server.cmd
 ```
+
+Trusting a certificate affects other applications using the current user's trust
+store too; read [Certificate security and upgrades](#certificate-security-and-upgrades)
+before accepting it.
 
 Open Excel → **Home** tab → **AI in Excel** → **Settings** → enter your API key.
 
@@ -120,8 +133,11 @@ API key:   your-key
 - **P12** — real URL validation/storage and request-only automatic proxy via
   `public/assets/api-url.js`, including migration of legacy local proxy URLs
 
-Re-run `python patch.py` at any time to rebuild `taskpane-DG2CZyG2.js` from
-the pristine `.orig` backup.
+The committed `public/` bundle is already patched; a fresh public clone can build
+it without Python or a `.orig` backup. Only if you have the **pristine upstream**
+`public/assets/taskpane-DG2CZyG2.js.orig`, run `python patch.py` (or
+`installer\build.cmd --patch`) to regenerate it. `.orig` files are intentionally
+ignored and excluded from SEA. Never copy the patched `.js` into `.orig`.
 
 ## Customize the branding
 
@@ -135,46 +151,113 @@ the pristine `.orig` backup.
 
 ## One-click installer for end users
 
-For users who don't have Node installed (no admin rights required):
+End users run a released setup executable without installing Node. **Building**
+requires Windows, Node.js 22+, built-in IExpress, and an already-installed
+`postject@1.0.0-alpha.6`. The build never downloads tools: it uses that version
+under local `node_modules/postject`, or an explicitly selected trusted cached CLI.
+
+`installer/certificate.ps1` is a required source input; an incomplete checkout
+fails before build tools run rather than falling back to a shared certificate.
 
 ```cmd
-cd installer
-build.cmd
+:: From the project root.
+installer\build.cmd
+
+:: Offline cached tool; separate output preserves an existing setup executable.
+installer\build.cmd --postject-path "C:\tools\postject\dist\cli.js" --output "C:\builds\AI-Excel-Setup-20260910-safe.exe"
+
+:: Optional: requires Python and the pristine upstream .orig file.
+installer\build.cmd --patch --postject-path "C:\tools\postject\dist\cli.js"
 ```
 
-Produces `installer/dist/AI-Excel-Setup.exe`. When run it:
+Use the real `dist/cli.js`, not an npm `.cmd` shim. Run
+`installer\build.cmd --help` for options. Relative paths are resolved from the
+project root, regardless of the caller's working directory. The default output
+**overwrites `installer/dist/AI-Excel-Setup.exe` only after successful packaging**;
+use `--output` to preserve it. Other existing `dist` files are neither read for
+packaging nor cleaned. Old packages and old secrets remain there until you review
+and remove them yourself; this build does not make them safe to distribute.
 
-- Picks a free port in 3000–3099
-- Installs a self-signed localhost cert into the current user's trust store
-- Embeds the entire frontend into a Node SEA binary (`AIExcelServer.exe`)
-- Creates desktop and Start Menu shortcuts
+Each run creates its own `installer/build/package-*/payload` and an absolute-path
+SED, leaving both for inspection. Default builds reuse the committed bundle and
+icons: no Python, Pillow, icon regeneration, or certificate generation. The SEA
+asset allowlist excludes backups, certificates, keys and development/test inputs.
+The IExpress payload is **exactly seven files**:
 
-To uninstall: **Start Menu → AI in Excel → Uninstall AI in Excel**
+`AIExcelCustom.exe`, `install.ps1`, `uninstall.ps1`, `launch.vbs`,
+`manifest.template.xml`, `app.ico`, `certificate.ps1`.
 
-Key design choices:
-- **No admin**: cert goes into `CurrentUser\Root`, files into
-  `%LOCALAPPDATA%\AIExcelCustom`, sideload into `HKCU` — no UAC prompt
-- **Auto port**: installer scans 3000–3099 for a free port; the frontend
-  uses `location.origin` so it follows the port automatically; if the port
-  is taken at runtime, the server picks a new one and re-registers the manifest
-- **Self-contained**: the frontend JS is embedded in the exe via Node SEA
+No PFX/CRT, thumbprint, private key, `certs/`, `gen-cert.ps1` wrapper, historical
+`install.log`, port file or runtime state is included.
+
+Installation selects a free port (3000–3099), places per-user files under
+`%LOCALAPPDATA%\AIExcelCustom`, registers the sideload in HKCU, and creates desktop
+and Start Menu shortcuts. The frontend is embedded in the Node SEA binary
+`AIExcelCustom.exe`. Certificate creation happens on the destination machine,
+not the build machine. Uninstall via **Start Menu → AI in Excel → Uninstall AI
+in Excel**.
+
+### Certificate security and upgrades
+
+- **Per-machine keys, never a bundled private key.** Install/uninstall share
+  `installer/certificate.ps1`. Each install/upgrade generates a fresh local key
+  in a new directory and trusts its matching public localhost certificate. Never
+  distribute or copy the generated `certs/` directory.
+- A PFX password of `localdev` is only a file-format compatibility value, **not a
+  secret or an access-control boundary**. Private-key protection depends on ACLs
+  limited to the current user and SYSTEM, plus user account security; other
+  processes with the same user's permissions may still read it.
+- `CurrentUser\Root` affects certificate validation for that user's other
+  applications too. It is **not app-exclusive trust**. A localhost-only
+  certificate does not make installing a root certificate harmless.
+- **Upgrading old shared-certificate releases requires more than replacing the
+  EXE.** Run the new installer to rotate the key. Caught upgrade failures attempt
+  rollback; if cleanup or recovery is denied, the error identifies retained
+  recovery files and must not be ignored. Only after success does cleanup remove the validated previous certificate and
+  the known shared legacy fingerprint from the relevant current-user stores.
+  Uninstall also uses verified fingerprints. Do not delete certificates by
+  `CN=localhost` or a broad subject match: unrelated local applications may use
+  their own certificates. Do not assume an old uninstaller completed this cleanup.
 
 ## Notes
 
-- Cert passphrase for `localhost.pfx`: `localdev` (set in `gen-cert.ps1` and
-  `server.cjs`)
+- Never commit development certificates or private keys. Project-root `certs/`
+  and common key containers are ignored; `.gitignore` does not untrack secrets
+  committed in the past or remove them from old installers.
 - Remove sideload: `npx office-addin-dev-settings unregister manifest/manifest.xml`
-- Restore original JS: `copy public\assets\taskpane-DG2CZyG2.js.orig public\assets\taskpane-DG2CZyG2.js`
+- Restore original JS only if you possess the pristine `.orig` backup:
+  `copy public\assets\taskpane-DG2CZyG2.js.orig public\assets\taskpane-DG2CZyG2.js`
 - The proxy uses direct connections (bypasses system proxy). To route through
   a local proxy (e.g. Clash on 127.0.0.1:7897), add an `undici` `ProxyAgent`
   in `server.cjs`.
 
+## Tests
+
+The complete Windows suite contains **97 tests**, covering URL handling, tool
+details, public-only packaging, certificate ownership, ACLs, upgrade rollback and
+uninstall cleanup. Run with Node's built-in runner and Windows PowerShell 5.1
+(no npm dependencies, Python, real installation or certificate-store changes).
+PKI/store operations are mocked; ephemeral test keys exercise real PFX parsing.
+These checks do not replace end-to-end installation testing in an isolated Windows account:
+
+```cmd
+node --test tests/*.test.mjs
+:: Build-security checks only:
+node --test tests/build-security.test.mjs
+```
+
+Build tests run the actual orchestration against temporary fixture directories
+and fake only the external SEA/postject/IExpress process boundaries. They check
+the exact seven-file package, dirty-dist isolation, private-input exclusions,
+fresh-clone/optional-patch behavior and tool failure handling. They are not a
+replacement for a Windows package/install acceptance test.
+
 ## License
 
 The patch scripts, server, and installer code in this repository are released
-under the **MIT License**. The original GLM in Excel frontend bundle
-(`taskpane-DG2CZyG2.js.orig`) is copyright ZhipuAI and is included here
-solely for patching purposes under fair use / personal modification.
+under the **MIT License**. The original GLM in Excel frontend bundle is copyright
+ZhipuAI. A pristine `taskpane-DG2CZyG2.js.orig` used locally for patching is not
+included in the public clone or installer.
 
 ---
 
@@ -221,18 +304,29 @@ solely for patching purposes under fair use / personal modification.
 
 **前提条件：** Node.js 22+，Windows + Microsoft Excel。
 
-```cmd
-:: 1. 生成自签名 localhost 证书（仅需一次）
-cd installer
-powershell -ExecutionPolicy Bypass -File gen-cert.ps1
-cd ..
+以下命令从项目根目录执行。证书默认生成到**项目根目录 `certs/`**，
+不是 `installer/dist/certs/`，且**生成时不会自动加入根信任库**。
+可用 `gen-cert.ps1 -OutputDirectory <path>` 指定其他新目录，但开发服务器
+默认读取根目录 `certs/`。不要复用旧安装包中的证书。
 
-:: 2. 注册 sideload 清单
+```cmd
+:: 1. 为本机生成 localhost 证书（仅需一次）。
+powershell -NoProfile -ExecutionPolicy Bypass -File installer\gen-cert.ps1
+
+:: 2. 核对公共证书及指纹，再决定是否信任。
+certutil -dump certs\localhost.crt
+:: 仅将刚生成的公共 CRT 显式加入当前用户的根信任库。
+powershell -NoProfile -Command "Import-Certificate -FilePath certs/localhost.crt -CertStoreLocation Cert:\CurrentUser\Root"
+
+:: 3. 注册 sideload 清单。
 npx office-addin-dev-settings register manifest/manifest.xml
 
-:: 3. 启动本地服务器（使用插件期间保持窗口开启）
+:: 4. 启动本地服务器（使用插件期间保持窗口开启）。
 start-server.cmd
 ```
+
+根证书信任也影响当前用户的其他应用，并非插件独占。操作前请阅读
+[证书安全与旧版本升级](#证书安全与旧版本升级)。
 
 打开 Excel → **开始** 选项卡 → **加载项** → **AI in Excel** → **设置** → 输入 API 密钥。
 
@@ -272,29 +366,96 @@ API 密钥: your-key
 
 ## 一键安装包（普通用户）
 
-无需安装 Node，无需管理员权限：
+普通用户运行发布的安装包，无需安装 Node。**构建安装包**需要 Windows、
+Node.js 22+、系统自带 IExpress，以及预先安装的 `postject@1.0.0-alpha.6`。
+构建过程不下载工具：默认使用本地 `node_modules/postject` 中的固定版本，
+也可显式指定可信缓存中的 CLI。`installer/certificate.ps1` 是必需的源码输入，
+缺失时会在运行构建工具前报错，不会退回共用证书方案。
 
 ```cmd
-cd installer
-build.cmd
+:: 在项目根目录运行。
+installer\build.cmd
+
+:: 使用离线缓存工具，并输出到独立文件，保护已有安装包。
+installer\build.cmd --postject-path "C:\tools\postject\dist\cli.js" --output "C:\builds\AI-Excel-Setup-20260910-safe.exe"
+
+:: 可选：仅重打补丁时需要 Python 和原始 .orig 文件。
+installer\build.cmd --patch --postject-path "C:\tools\postject\dist\cli.js"
 ```
 
-生成 `installer/dist/AI-Excel-Setup.exe`。运行后：
+请指定真实的 `dist/cli.js`，不要指定 npm 的 `.cmd` 包装脚本。
+`installer\build.cmd --help` 查看参数；相对路径始终相对于项目根目录解析，
+不受启动目录影响。默认输出会在打包成功后**覆盖
+`installer/dist/AI-Excel-Setup.exe`**，需要保留旧包时请用 `--output`。
+其他现有 `dist` 文件不会被读取打包，也不会被清理；其中旧证书、旧包仍需
+单独审查处理，新构建流程不会让旧文件自动变得适合分发。
+
+每次构建使用独立的 `installer/build/package-*/payload` 和绝对路径 SED，
+保留供检查。普通构建直接复用已提交的前端及图标，**不需要 Python、Pillow
+或 `.orig`**，也不会生成图标或证书。SEA 静态资源白名单排除备份、证书、
+密钥及开发/测试输入。IExpress 安装包**严格只有 7 个载荷文件**：
+
+`AIExcelCustom.exe`、`install.ps1`、`uninstall.ps1`、`launch.vbs`、
+`manifest.template.xml`、`app.ico`、`certificate.ps1`。
+
+不含 PFX/CRT、指纹文件、私钥、`certs/`、`gen-cert.ps1` 包装脚本、历史
+`install.log`、端口或运行状态。公开克隆中的前端已经打好补丁；仅当你拥有
+原始上游 `public/assets/taskpane-DG2CZyG2.js.orig` 时才使用 `--patch`。
+`.orig` 不提交、不嵌入 SEA，**不要把已修改的 JS 复制成 `.orig`**。
+
+安装后：
 
 - 自动选择 3000–3099 中的空闲端口
-- 将自签名证书安装到当前用户信任区
-- 将整个前端嵌入 Node SEA 可执行文件
-- 创建桌面和开始菜单快捷方式
+- 在目标机器生成新的 localhost 私钥/证书，并信任对应公共证书
+- 将程序安装到 `%LOCALAPPDATA%\AIExcelCustom`，通过 HKCU 注册加载项
+- 前端嵌入 `AIExcelCustom.exe`，创建桌面和开始菜单快捷方式
 
 卸载：**开始菜单 → AI in Excel → 卸载 AI in Excel**
 
+### 证书安全与旧版本升级
+
+- **每机生成，不随包分发私钥。** 安装与卸载共用 `installer/certificate.ps1`；
+  每次安装/升级在新目录生成并轮换本地密钥，仅信任与之对应的公共证书。
+  不要上传、分发或跨机器复制生成的 `certs/`。
+- PFX 密码 `localdev` 只是格式兼容值，**不是秘密，也不是安全访问边界**。
+  私钥安全依赖仅授予当前用户和 SYSTEM 的文件 ACL，以及账户本身的安全；
+  拥有相同用户权限的其他进程仍可能读取它。
+- `CurrentUser\Root` 会影响该用户其他应用的证书验证，**不是本应用独占信任**。
+  即使证书限定 localhost，也不能把添加根信任描述成完全无害。
+- **从旧共用证书版本升级不能只替换 EXE。** 请运行新安装器轮换密钥；
+  捕获到升级失败时会尝试回滚；清理或恢复被拒绝时，错误会指出保留的恢复目录，
+  不能忽略该提示。仅成功后才按经过验证的旧证书指纹及已知共用证书的精确指纹
+  清理相关当前用户证书库。卸载同样使用已验证的指纹，不按 `CN=localhost`
+  或宽泛主题名批量删除，以免误伤其他本地应用。不要假设旧版卸载器已完成清理。
+
 ## 注意事项
 
-- `localhost.pfx` 证书密码：`localdev`（在 `gen-cert.ps1` 和 `server.cjs` 中配置）
+- 不要提交开发证书或私钥。根目录 `certs/` 及常见私钥容器已忽略，但
+  `.gitignore` 不会撤回过去已提交的秘密，也不会清理旧安装包。
 - 移除 sideload：`npx office-addin-dev-settings unregister manifest/manifest.xml`
-- 还原原始 JS：`copy public\assets\taskpane-DG2CZyG2.js.orig public\assets\taskpane-DG2CZyG2.js`
+- 仅当拥有原始 `.orig` 备份时还原 JS：`copy public\assets\taskpane-DG2CZyG2.js.orig public\assets\taskpane-DG2CZyG2.js`
 - 代理使用直连方式（绕过系统代理）。如需通过本地代理（如 Clash 127.0.0.1:7897），在 `server.cjs` 中添加 `undici` `ProxyAgent`。
+
+## 测试
+
+Windows 完整测试共 **97 项**，覆盖 URL、工具详情、无私钥打包、证书归属、
+ACL、升级回滚及卸载清理。使用 Node 自带测试器和 Windows PowerShell 5.1，
+无 npm 依赖，不需要 Python，不执行真实安装或修改证书库。
+PKI/信任库操作使用模拟，临时内存测试密钥用于验证真实 PFX 解析；
+这些检查不能替代隔离 Windows 用户下的完整安装验收：
+
+```cmd
+node --test tests/*.test.mjs
+:: 仅运行构建安全测试：
+node --test tests/build-security.test.mjs
+```
+
+构建测试在临时 fixture 目录运行真实编排，仅替换外部 SEA/postject/IExpress
+进程边界，验证精确 7 文件、污染 dist 隔离、私密输入排除、公开克隆无需
+`.orig`、可选补丁及子步骤失败处理；不能替代 Windows 真实打包/安装验收。
 
 ## 许可证
 
-本仓库中的补丁脚本、服务器和安装程序代码以 **MIT 许可证** 发布。原始 GLM in Excel 前端包（`taskpane-DG2CZyG2.js.orig`）版权归智谱AI所有，仅出于补丁目的包含在此，属于合理使用 / 个人修改范畴。
+本仓库中的补丁脚本、服务器和安装程序代码以 **MIT 许可证** 发布。
+原始 GLM in Excel 前端包版权归智谱AI所有；本地用于打补丁的原始
+`taskpane-DG2CZyG2.js.orig` 不包含在公开克隆或安装包中。

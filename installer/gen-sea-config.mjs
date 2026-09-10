@@ -1,37 +1,46 @@
-// Builds sea-config.json: main = server.cjs, assets = every file under public/.
+// Include runtime static assets only; never embed local backups or certificates.
 // Asset keys are POSIX-relative paths (match server.cjs readAsset()).
-import { readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, relative, dirname, sep } from "node:path";
+import { readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, relative, dirname, sep, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, "..");          // project root
-const pub = join(root, "public");
-const buildDir = join(here, "build");
-mkdirSync(buildDir, { recursive: true });
+const staticTypes = new Set([".html", ".js", ".css", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".eot"]);
+const privatePart = /(?:^|[._-])(?:orig|bak|backup|test|tests|spec|fixtures?|dev|debug|coverage|node_modules|runtime|local|private|secrets?|certs?|certificates?|keys?|pem|pfx|p12|p7b|p7c|crt|cer|der|csr|thumbprint)(?:$|[._-])/i;
+const posix = path => path.split(sep).join("/");
 
-function walk(dir, acc) {
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, acc);
-    else acc.push(full);
+export function createSeaConfig({ root = join(here, ".."), buildDir = join(here, "build") } = {}) {
+  root = resolve(root);
+  buildDir = resolve(buildDir);
+  const pub = join(root, "public");
+  const assets = {};
+  function walk(dir) {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      // Do not follow symlinks/junctions out of the public tree.
+      if (entry.name.startsWith(".") || privatePart.test(entry.name) || entry.isSymbolicLink()) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && staticTypes.has(extname(entry.name).toLowerCase())) {
+        assets[posix(relative(pub, full))] = posix(full);
+      }
+    }
   }
-  return acc;
+  walk(pub);
+  const config = {
+    main: posix(join(root, "server.cjs")),
+    output: posix(join(buildDir, "sea-prep.blob")),
+    disableExperimentalSEAWarning: true,
+    useSnapshot: false,
+    useCodeCache: false,
+    assets,
+  };
+  mkdirSync(buildDir, { recursive: true });
+  const configPath = join(buildDir, "sea-config.json");
+  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  return { config, configPath };
 }
 
-const assets = {};
-for (const f of walk(pub, [])) {
-  const key = relative(pub, f).split(sep).join("/"); // posix key
-  assets[key] = f.split(sep).join("/");
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const { config } = createSeaConfig();
+  console.log("sea-config.json:", Object.keys(config.assets).length, "assets");
 }
-
-const cfg = {
-  main: join(root, "server.cjs").split(sep).join("/"),
-  output: join(buildDir, "sea-prep.blob").split(sep).join("/"),
-  disableExperimentalSEAWarning: true,
-  useSnapshot: false,
-  useCodeCache: false,
-  assets,
-};
-writeFileSync(join(buildDir, "sea-config.json"), JSON.stringify(cfg, null, 2));
-console.log("sea-config.json:", Object.keys(assets).length, "assets");

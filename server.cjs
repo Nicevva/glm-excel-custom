@@ -33,6 +33,7 @@ const MIME = {
 function tlsOptions() {
   const pfx = join(CERTS, "localhost.pfx");
   if (existsSync(pfx)) return { pfx: readFileSync(pfx), passphrase: PFX_PASS };
+  if (inSea) throw new Error("Local HTTPS certificate is missing. Please reinstall AI in Excel to generate a new machine-local certificate.");
   // dev fallback: office-addin-dev-certs PEM in homedir
   const os = require("node:os");
   const d = join(os.homedir(), ".office-addin-dev-certs");

@@ -7,9 +7,20 @@ installer/dist/*.crt
 installer/dist/cert.thumbprint
 installer/dist/certs/
 
+# Machine-local certificates and private keys (never distribute)
+/certs/
+*.pfx
+*.p12
+*.key
+*.pem
+*.jks
+*.keystore
+cert.thumbprint
+
 # Build artifacts
 installer/build/sea-prep.blob
 installer/build/sea-config.json
+installer/build/package-*/
 
 # Python cache
 __pycache__/
